@@ -1,0 +1,24 @@
+# ===== 构建产物 =====
+build/
+dist/
+*.spec.bak
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# ===== 运行时数据（个人统计/记账数据，勿上传） =====
+data/
+logs/
+backup/
+window_state.ini
+config.ini
+
+# ===== 其它 =====
+*.log
+.DS_Store
+Thumbs.db
