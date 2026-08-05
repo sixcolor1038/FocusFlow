@@ -108,6 +108,7 @@ class KeyListener:
         self._paused = False
         self._pause_lock = threading.Lock()
         self._pause_callbacks: List[Callable[[bool], None]] = []
+        self._key_callbacks: List[Callable[[str], None]] = []
         # 加载过滤配置
         self._ignore_modifiers = config.getbool('listener', 'ignore_modifier_keys', False)
         self._ignore_functions = config.getbool('listener', 'ignore_function_keys', False)
@@ -127,6 +128,11 @@ class KeyListener:
     def add_pause_callback(self, cb: Callable[[bool], None]):
         """注册暂停状态变化回调"""
         self._pause_callbacks.append(cb)
+
+    def add_key_callback(self, cb: Callable[[str], None]):
+        """注册按键回调（每个有效按键触发一次，用于番茄钟计数 / 高强度输入检测等）"""
+        if cb not in self._key_callbacks:
+            self._key_callbacks.append(cb)
 
     def is_paused(self) -> bool:
         with self._pause_lock:
@@ -192,6 +198,12 @@ class KeyListener:
             import stats
             database.record_key(key_name)
             stats.record_cpm()
+            # 通知按键回调（番茄钟 / 高强度输入检测等）
+            for cb in self._key_callbacks:
+                try:
+                    cb(key_name)
+                except Exception as e:
+                    log.debug('按键回调异常: %s', e)
         except Exception as e:
             log.error('on_press 异常: %s', e, exc_info=True)
 

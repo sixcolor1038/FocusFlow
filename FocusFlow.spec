@@ -18,6 +18,7 @@ hiddenimports = [
     'autostart', 'hotkey', 'tray', 'floating_window',
     'exporter', 'gui', 'cli', 'shutdown', 'edge_history',
     'accounting', 'scheduler', 'plugins',
+    'pomodoro', 'rest_reminder',
     # 第三方库
     'pystray._win32',
     'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFont', 'PIL.ImageTk',
@@ -44,6 +45,7 @@ local_modules = [
     'autostart.py', 'hotkey.py', 'tray.py', 'floating_window.py',
     'exporter.py', 'gui.py', 'cli.py', 'shutdown.py',
     'edge_history.py', 'accounting.py', 'scheduler.py', 'plugins.py',
+    'pomodoro.py', 'rest_reminder.py',
 ]
 for mod in local_modules:
     mod_path = os.path.join(SPEC_DIR, mod)

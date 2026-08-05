@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-FocusFlow - 效率追踪器 v1.0
+FocusFlow - 效率追踪器 v1.1
 模块化重构 + 全面优化 + 年度归档 + 纯键盘统计
+
+v1.1 变更：新增"小憩与护眼"联动功能——
+           检测连续高强度输入自动弹出护眼提醒（休息一下/继续工作）；
+           新增番茄工作法（定时器 + 按键统计联动，记录每个番茄钟的按键数据）。
 
 v1.0 变更：全新 DeepSeek 风格界面（液态玻璃卡片 + 渐变背景 + 顶部导航 +
            主卡片 + 无 emoji）；窗口与弹窗居中；移除插件内嵌视图；
@@ -16,11 +20,13 @@ v1.0 变更：全新 DeepSeek 风格界面（液态玻璃卡片 + 渐变背景 +
 - logger.py        日志（RotatingFileHandler 5MB×3 + 全局异常钩子）
 - database.py      数据库（年度归档/WAL/单写线程/缓存/备份/VACUUM/清理）
 - stats.py         CPM 计算（带锁+缓存）
-- listener.py      键盘监听（暂停/过滤）
+- listener.py      键盘监听（暂停/过滤/按键回调）
 - autostart.py     开机自启（注册表）
 - hotkey.py        全局热键（Ctrl+Shift+F）
 - tray.py          系统托盘（暂停态图标/tooltip）
 - floating_window.py 悬浮窗
+- pomodoro.py      番茄工作法（定时器 + 每个番茄钟按键统计）
+- rest_reminder.py 小憩与护眼（高强度输入检测 + 休息提醒）
 - exporter.py      数据导出（CSV/HTML）
 - gui.py           主界面（现代主题/汉化/分组/趋势图）
 - cli.py           命令行接口
@@ -62,7 +68,7 @@ def _load_local_modules():
     local_modules = [
         'config', 'logger', 'database', 'stats', 'listener',
         'autostart', 'hotkey', 'tray', 'floating_window',
-        'exporter', 'gui', 'cli', 'shutdown',
+        'exporter', 'gui', 'cli', 'shutdown', 'pomodoro', 'rest_reminder',
     ]
 
     for mod_name in local_modules:
@@ -127,6 +133,8 @@ import edge_history      # noqa: E402
 import accounting        # noqa: E402
 import scheduler         # noqa: E402
 import plugins           # noqa: E402
+import pomodoro          # noqa: E402
+import rest_reminder     # noqa: E402
 
 # 以下模块依赖第三方库，用 try 包裹
 # 这些 import 主要是给 PyInstaller 静态分析用的
@@ -224,9 +232,29 @@ def main():
     from listener import start_listener
     start_listener()
 
+    # 注册按键回调：番茄钟计数 + 护眼提醒检测
+    try:
+        from listener import get_listener
+        from pomodoro import get_pomodoro
+        from rest_reminder import get_rest_reminder
+        _listener = get_listener()
+        _listener.add_key_callback(get_pomodoro().record_key)
+        _listener.add_key_callback(get_rest_reminder().record_key)
+    except Exception as e:
+        log_main.warning('注册按键回调失败: %s', e)
+
     from gui import FocusFlowApp
     hidden = '--hidden' in sys.argv or config.getbool('gui', 'start_to_tray', False)
     app = FocusFlowApp(hidden=hidden)
+
+    # 启动护眼提醒（弹出休息提示）
+    try:
+        from rest_reminder import get_rest_reminder
+        reminder = get_rest_reminder()
+        reminder.add_callback(lambda count: app.root.after(0, lambda: app.show_rest_reminder(count)))
+        reminder.start()
+    except Exception as e:
+        log_main.warning('启动护眼提醒失败: %s', e)
 
     from tray import init_tray
     init_tray(app)

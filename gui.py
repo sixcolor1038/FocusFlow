@@ -1571,6 +1571,123 @@ class FocusFlowApp:
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 
+    # ---------- 小憩与护眼 ----------
+    def show_rest_reminder(self, count: int = 0):
+        """弹出护眼提醒对话框（20 秒倒计时，可选"休息一下 / 继续工作"）
+
+        由护眼提醒模块在检测到高强度输入后调用（已通过 root.after 调度到主线程）。
+        """
+        try:
+            # 避免重复弹窗：已有提醒窗口则前置并返回
+            existing = getattr(self, '_rest_reminder_window', None)
+            if existing is not None:
+                try:
+                    if existing.winfo_exists():
+                        existing.lift()
+                        existing.focus_force()
+                        return
+                except Exception:
+                    pass
+
+            rest_seconds = max(5, config.getint('rest', 'rest_seconds', 20))
+            window_minutes = config.getint('rest', 'window_minutes', 30)
+
+            top = tk.Toplevel(self.root)
+            top.title("小憩与护眼")
+            top.resizable(False, False)
+            top.attributes('-topmost', True)
+            top.transient(self.root)
+            self._rest_reminder_window = top
+
+            container = ttk.Frame(top, padding=24)
+            container.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(container, text="眼睛需要休息啦",
+                      font=("Segoe UI", 16, "bold"),
+                      foreground=self._theme_colors['accent']).pack(anchor='w')
+
+            msg = (f"检测到你在 {window_minutes} 分钟内按键 {count:,} 次，\n"
+                   "高强度输入已持续一段时间，建议休息片刻保护眼睛。")
+            ttk.Label(container, text=msg, justify='left',
+                      font=("Segoe UI", 11)).pack(anchor='w', pady=(10, 6))
+
+            countdown_var = tk.StringVar(value=f"{rest_seconds} 秒后自动继续")
+            ttk.Label(container, textvariable=countdown_var,
+                      style='Subtitle.TLabel').pack(anchor='w', pady=(0, 12))
+
+            btn_frame = ttk.Frame(container)
+            btn_frame.pack(anchor='w')
+
+            state = {'countdown': rest_seconds, 'closed': False}
+
+            def _on_break():
+                state['closed'] = True
+                _close()
+                # 休息一下：若番茄钟在工作，自动切到休息
+                try:
+                    from pomodoro import get_pomodoro
+                    timer = get_pomodoro()
+                    if timer.get_state() == 'work':
+                        timer.start_break()
+                except Exception as e:
+                    log.debug('切换番茄钟休息失败: %s', e)
+                self._reset_rest_reminder()
+
+            def _on_continue():
+                state['closed'] = True
+                _close()
+                self._reset_rest_reminder()
+
+            def _close():
+                try:
+                    top.destroy()
+                except Exception:
+                    pass
+                try:
+                    self._rest_reminder_window = None
+                except Exception:
+                    pass
+
+            def _tick_countdown():
+                if state['closed']:
+                    return
+                state['countdown'] -= 1
+                if state['countdown'] <= 0:
+                    state['closed'] = True
+                    _close()
+                    self._reset_rest_reminder()
+                    return
+                countdown_var.set(f"{state['countdown']} 秒后自动继续")
+                top.after(1000, _tick_countdown)
+
+            ttk.Button(btn_frame, text="休息一下", style='Accent.TButton',
+                       command=_on_break).pack(side=tk.LEFT)
+            ttk.Button(btn_frame, text="继续工作", width=10,
+                       command=_on_continue).pack(side=tk.LEFT, padx=(10, 0))
+
+            top.protocol("WM_DELETE_WINDOW", _on_continue)
+            try:
+                top.update_idletasks()
+                w = top.winfo_reqwidth()
+                h = top.winfo_reqheight()
+                sw = top.winfo_screenwidth()
+                sh = top.winfo_screenheight()
+                top.geometry(f"+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+            except Exception:
+                pass
+
+            top.after(1000, _tick_countdown)
+        except Exception as e:
+            log.error('显示护眼提醒失败: %s', e, exc_info=True)
+
+    def _reset_rest_reminder(self):
+        """提醒关闭后重置护眼计数，避免立刻再次触发"""
+        try:
+            from rest_reminder import get_rest_reminder
+            get_rest_reminder().reset()
+        except Exception:
+            pass
+
     # ---------- 悬浮窗 ----------
     def toggle_floating(self):
         """切换悬浮窗显示/隐藏。

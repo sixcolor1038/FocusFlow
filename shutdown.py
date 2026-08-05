@@ -73,6 +73,18 @@ def graceful_shutdown():
         except Exception as e:
             log.error('数据库关闭失败: %s', e, exc_info=True)
 
+        # 4.5 关闭番茄钟与护眼提醒
+        try:
+            from pomodoro import shutdown as pomo_shutdown
+            pomo_shutdown()
+        except Exception as e:
+            log.warning('关闭番茄钟失败: %s', e)
+        try:
+            from rest_reminder import shutdown as rest_shutdown
+            rest_shutdown()
+        except Exception as e:
+            log.warning('关闭护眼提醒失败: %s', e)
+
         # 5. 销毁 GUI 并退出
         log.info('优雅退出完成，正在终止进程')
 

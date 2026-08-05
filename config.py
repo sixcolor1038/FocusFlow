@@ -17,7 +17,7 @@ from typing import Optional
 APP_NAME = "FocusFlow"
 APP_DISPLAY_NAME = "FocusFlow - 效率追踪器"
 APP_DESCRIPTION = "FocusFlow - 效率与专注力分析工具"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_AUTHOR = "FocusFlow"
 
 
@@ -77,6 +77,20 @@ DEFAULT_CONFIG = {
     },
     'tray': {
         'tooltip_interval': '5',       # 托盘 tooltip 刷新间隔（秒）
+    },
+    'pomodoro': {
+        'enabled': 'true',             # 启用番茄钟
+        'work_minutes': '25',          # 工作时长（分钟）
+        'break_minutes': '5',          # 休息时长（分钟）
+        'auto_break': 'true',          # 工作结束后自动进入休息
+    },
+    'rest': {
+        'enabled': 'true',             # 启用护眼提醒
+        'window_minutes': '30',        # 检测窗口（分钟）
+        'key_threshold': '10000',      # 窗口内按键阈值
+        'cooldown_minutes': '10',      # 提醒冷却（分钟）
+        'rest_seconds': '20',          # 提醒倒计时（秒）
+        'check_interval': '10',        # 检测间隔（秒）
     },
 }
 

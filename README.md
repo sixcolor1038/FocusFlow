@@ -3,7 +3,7 @@
 > 个人效率与专注力分析工具：键盘活跃统计 + 记账本 + 定时任务 + Edge 历史记录
 > 深色/亮色"液态玻璃"界面，纯本地存储，数据不上传任何服务器。
 
-![Version](https://img.shields.io/badge/version-1.0-blue)
+![Version](https://img.shields.io/badge/version-1.1-blue)
 ![Python](https://img.shields.io/badge/Python-3.13-green)
 ![Platform](https://img.shields.io/badge/Windows-10%2F11-blueviolet)
 
@@ -25,6 +25,16 @@
 - 近 7/30 天活跃趋势图、小时分布、星期分布
 - **长按自动重复过滤**：玩游戏/长按某键时自动重复不计入，避免计数虚高
 - **清除今日按键**：异常计数一键清除
+
+### 小憩与护眼
+- **自动休息提醒**：检测连续高强度输入（默认 30 分钟 10000 键），自动弹出护眼提醒
+- **20 秒倒计时**弹窗，可选"休息一下"或"继续工作"
+- **提醒冷却机制**：避免频繁打扰，阈值/窗口/冷却均可配置
+
+### 番茄工作法
+- 内置插件「番茄工作法」：工作/休息定时器（默认 25 分钟工作 + 5 分钟休息）
+- **与统计联动**：每个番茄钟自动记录按键数据，可查看今日完成数与平均速度
+- 自动切换工作/休息，历史记录持久化保存
 
 ### 记账本
 - 收入/支出记录的增删改查，按 ID 排序
@@ -84,6 +94,8 @@ key_counter/
 ├── gui.py                主界面（DeepSeek 风格）
 ├── database.py           数据库（年度归档 / 单写线程）
 ├── listener.py           键盘监听（长按过滤）
+├── pomodoro.py           番茄工作法（定时器 + 按键统计联动）
+├── rest_reminder.py      小憩与护眼（高强度输入检测）
 ├── accounting.py         记账本后端
 ├── edge_history.py       Edge 历史记录后端
 ├── scheduler.py          定时任务后端
@@ -92,7 +104,7 @@ key_counter/
 ├── tray.py               系统托盘
 ├── hotkey.py             全局热键
 ├── exporter.py           数据导出（CSV / HTML）
-├── plugins/              内置插件（记账本 / 定时任务 / Edge 历史）
+├── plugins/              内置插件（记账本 / 定时任务 / Edge 历史 / 番茄工作法）
 ├── hooks/                PyInstaller 钩子
 ├── FocusFlow.spec        PyInstaller 打包配置
 ├── build.bat             一键打包脚本

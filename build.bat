@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
 echo ========================================
-echo   FocusFlow - Build Script v1.0
+echo   FocusFlow - Build Script v1.1
 echo ========================================
 echo.
 
@@ -55,6 +55,8 @@ if not exist gui.py echo   WARNING: gui.py not found!
 if not exist cli.py echo   WARNING: cli.py not found!
 if not exist shutdown.py echo   WARNING: shutdown.py not found!
 if not exist key_counter.py echo   WARNING: key_counter.py not found!
+if not exist pomodoro.py echo   WARNING: pomodoro.py not found!
+if not exist rest_reminder.py echo   WARNING: rest_reminder.py not found!
 echo.
 
 pyinstaller --noconfirm FocusFlow.spec
@@ -83,6 +85,8 @@ if errorlevel 1 (
         --hidden-import=accounting ^
         --hidden-import=scheduler ^
         --hidden-import=plugins ^
+        --hidden-import=pomodoro ^
+        --hidden-import=rest_reminder ^
         --hidden-import=pystray._win32 ^
         --hidden-import=PIL.Image ^
         --hidden-import=PIL.ImageDraw ^
@@ -109,6 +113,8 @@ if errorlevel 1 (
         --add-data "accounting.py;." ^
         --add-data "scheduler.py;." ^
         --add-data "plugins.py;." ^
+        --add-data "pomodoro.py;." ^
+        --add-data "rest_reminder.py;." ^
         --exclude-module matplotlib ^
         --exclude-module numpy ^
         --exclude-module pandas ^
