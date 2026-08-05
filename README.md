@@ -1,0 +1,132 @@
+# FocusFlow · 效率追踪器
+
+> 个人效率与专注力分析工具：键盘活跃统计 + 记账本 + 定时任务 + Edge 历史记录
+> 深色/亮色"液态玻璃"界面，纯本地存储，数据不上传任何服务器。
+
+![Version](https://img.shields.io/badge/version-3.11-blue)
+![Python](https://img.shields.io/badge/Python-3.13-green)
+![Platform](https://img.shields.io/badge/Windows-10%2F11-blueviolet)
+
+---
+
+## 界面预览
+
+> 截图占位：将主界面截图命名为 `docs/screenshot_light.png`（亮色）、`docs/screenshot_dark.png`（暗色）放入后显示。
+
+---
+
+## 核心功能
+
+### 键盘统计
+- 实时记录每个按键的次数、占比排行
+- 实时打字速度（CPM，每分钟按键数）
+- 多周期统计：今日 / 7 天 / 15 天 / 30 天 / 1 年 / 总计
+- 历史日期查询、按键分组统计
+- 近 7/30 天活跃趋势图、小时分布、星期分布
+- **长按自动重复过滤**：玩游戏/长按某键时自动重复不计入，避免计数虚高
+- **清除今日按键**：异常计数一键清除
+
+### 记账本
+- 收入/支出记录的增删改查，按 ID 排序
+- 分类/子分类、日期范围、关键词筛选，每页 10 条分页
+- 月度汇总（分类明细按净值统计）
+- 分类盈亏 / 细分盈亏统计（如游戏投入/赚取）
+- 选中记录查看"距今多久"（年 + 天）
+
+### 定时任务
+- 每日定时 / 一次性 / 间隔执行三种调度
+- 后台线程自动执行、启用/禁用
+
+### Edge 历史记录
+- 今日 / 总历史记录数查询
+- 近 30 天趋势图（本地绘制，无第三方依赖）
+
+### 插件系统
+- 动态加载 / 卸载 / 热重载 / 编辑 / 删除
+- 文件变更自动热加载
+
+### 悬浮窗 & 托盘
+- 悬浮窗：启动自动显示、始终置顶（不被任务栏遮挡）、可拖动、位置记忆
+- 系统托盘：悬停显示今日活跃/速度、右键菜单
+- 全局热键 `Ctrl+Shift+F` 显示/隐藏窗口
+- 开机自启、启动时直接进入托盘
+
+---
+
+## 界面设计
+
+- **DeepSeek 风格"液态玻璃"**：渐变背景 + 装饰光斑、半透明玻璃卡片、柔和阴影与高光
+- 科技蓝 `#4D8CF7` 主色、深灰 `#1A1A2E` 文字
+- 亮色 / 暗色双主题一键切换
+- 窗口尺寸与位置记忆（存 `window_state.ini`）
+
+---
+
+## 技术栈
+
+| 组件 | 说明 |
+| --- | --- |
+| Python 3.13 | 开发语言 |
+| Tkinter / ttk | 界面（无第三方 UI 库） |
+| PyInstaller | 单文件打包（onefile） |
+| pynput | 键盘全局监听 |
+| pystray | 系统托盘 |
+| Pillow | 图形绘制（玻璃卡片 / 渐变背景 / 图标） |
+| SQLite | 本地存储，年度自动归档 |
+
+---
+
+## 目录结构
+
+```
+key_counter/
+├── key_counter.py        程序入口
+├── gui.py                主界面（DeepSeek 风格）
+├── database.py           数据库（年度归档 / 单写线程）
+├── listener.py           键盘监听（长按过滤）
+├── accounting.py         记账本后端
+├── edge_history.py       Edge 历史记录后端
+├── scheduler.py          定时任务后端
+├── plugins.py            插件系统
+├── floating_window.py    悬浮窗（始终置顶）
+├── tray.py               系统托盘
+├── hotkey.py             全局热键
+├── exporter.py           数据导出（CSV / HTML）
+├── plugins/              内置插件（记账本 / 定时任务 / Edge 历史）
+├── hooks/                PyInstaller 钩子
+├── FocusFlow.spec        PyInstaller 打包配置
+├── build.bat             一键打包脚本
+└── 使用说明.txt           详细使用说明
+```
+
+---
+
+## 构建方法
+
+需要 Python 3.8+，然后：
+
+```bash
+pip install -r requirements.txt
+pyinstaller --noconfirm FocusFlow.spec
+```
+
+或直接双击 `build.bat`。产物在 `dist/FocusFlow.exe`。
+
+---
+
+## 部署（免安装）
+
+- `FocusFlow.exe` 为单文件自包含程序，已内置 Python 与全部依赖
+- 新电脑上无需安装任何环境，解压即用（Windows 10/11 64 位）
+- 数据保存在 exe 同目录（`data/`、`logs/` 等），拷贝整个文件夹即可迁移数据
+
+---
+
+## 隐私说明
+
+- 数据完全本地存储，**不上传任何信息**
+- 键盘数据仅用于统计，可随时"暂停记录"或清理
+
+## 许可证
+
+本项目仅用于个人学习与效率管理，请勿用于商业用途。
