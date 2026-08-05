@@ -112,7 +112,7 @@ else:
         sys.path.insert(0, _script_dir)
 
 from logger import log, install_global_excepthook, get_logger
-from config import config, APP_NAME, APP_DISPLAY_NAME
+from config import config, APP_NAME, APP_DISPLAY_NAME, get_start_to_tray
 
 log_main = get_logger('main')
 
@@ -244,7 +244,7 @@ def main():
         log_main.warning('注册按键回调失败: %s', e)
 
     from gui import FocusFlowApp
-    hidden = '--hidden' in sys.argv or config.getbool('gui', 'start_to_tray', False)
+    hidden = '--hidden' in sys.argv or get_start_to_tray()
     app = FocusFlowApp(hidden=hidden)
 
     # 启动护眼提醒（弹出休息提示）

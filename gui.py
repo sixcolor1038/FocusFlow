@@ -21,6 +21,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from PIL import Image, ImageDraw, ImageTk
 
 from config import (config, APP_NAME, APP_DISPLAY_NAME,
+                    APP_VERSION, APP_UPDATE_DATE,
                     get_window_geometry, set_window_geometry,
                     get_ui_state, set_ui_state)
 from logger import get_logger
@@ -1383,7 +1384,8 @@ class FocusFlowApp:
         top.title("设置")
         top.resizable(False, False)
         top.transient(self.root)
-        top.grab_set()
+        # 先隐藏窗口，构建完成并居中后再显示，避免从左上角"闪现"到中间的视觉跳动
+        top.withdraw()
 
         container = ttk.Frame(top, padding=18)
         container.pack(fill=tk.BOTH, expand=True)
@@ -1442,11 +1444,12 @@ class FocusFlowApp:
         ttk.Checkbutton(container, text="显示悬浮窗", variable=float_var,
                         command=_toggle_float).pack(anchor='w', pady=3)
 
-        # 启动时最小化到托盘
-        tray_var = tk.BooleanVar(value=config.getbool('gui', 'start_to_tray', False))
+        # 启动时最小化到托盘（存入独立状态文件，更新软件后保留）
+        from config import get_start_to_tray, set_start_to_tray
+        tray_var = tk.BooleanVar(value=get_start_to_tray())
 
         def _toggle_tray():
-            config.set('gui', 'start_to_tray', 'true' if tray_var.get() else 'false')
+            set_start_to_tray(tray_var.get())
 
         ttk.Checkbutton(container, text="启动时直接进入托盘（不显示主窗口）",
                         variable=tray_var,
@@ -1476,10 +1479,15 @@ class FocusFlowApp:
                   text="提示：退出程序请右键托盘图标选择「退出程序」。",
                   style='Subtitle.TLabel', justify='left').pack(anchor='w', pady=(0, 10))
 
+        # ===== 版本信息 =====
+        ttk.Label(container,
+                  text=f"FocusFlow v{APP_VERSION} · 更新日期 {APP_UPDATE_DATE}",
+                  style='Subtitle.TLabel', foreground=self._theme_colors['muted']).pack(anchor='w', pady=(0, 8))
+
         ttk.Button(container, text="关闭", width=8,
                    command=top.destroy).pack(anchor='e')
 
-        # 按内容自适应尺寸并居中
+        # 按内容自适应尺寸并居中（隐藏状态下调整，避免可见闪烁）
         try:
             top.update_idletasks()
             w = max(360, top.winfo_reqwidth())
@@ -1488,6 +1496,8 @@ class FocusFlowApp:
         except Exception:
             top.geometry("400x560")
         self._center_window(top)
+        # 居中完成后一次性显示
+        top.deiconify()
 
     def update_autostart_ui(self):
         # 开机自启已移入"设置"对话框，此处保留空实现以兼容旧调用

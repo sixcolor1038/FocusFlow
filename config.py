@@ -19,6 +19,7 @@ APP_DISPLAY_NAME = "FocusFlow - 效率追踪器"
 APP_DESCRIPTION = "FocusFlow - 效率与专注力分析工具"
 APP_VERSION = "1.1.0"
 APP_AUTHOR = "FocusFlow"
+APP_UPDATE_DATE = "2026-08-06"
 
 
 def get_app_dir() -> str:
@@ -233,6 +234,19 @@ def set_ui_state(section: str, option: str, value: str) -> None:
                 parser.write(f)
     except Exception:
         pass
+
+
+def get_start_to_tray() -> bool:
+    """读取"启动时直接进入托盘"设置（独立状态文件优先，兼容旧版 config.ini）"""
+    val = get_ui_state('prefs', 'start_to_tray')
+    if val:
+        return val.lower() in ('true', '1', 'yes')
+    return config.getbool('gui', 'start_to_tray', False)
+
+
+def set_start_to_tray(enabled: bool) -> None:
+    """保存"启动时直接进入托盘"设置到独立状态文件（更新软件时不会被 config.ini 覆盖）"""
+    set_ui_state('prefs', 'start_to_tray', 'true' if enabled else 'false')
 
 
 # 全局单例
