@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FocusFlow 记账模块（v3.1 完整版）
+FocusFlow 记账模块（v1.0 完整版）
 
 功能：
 - 记录收入和支出

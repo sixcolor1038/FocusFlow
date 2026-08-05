@@ -259,7 +259,7 @@ class FocusFlowApp:
 
         if config.getbool('floating', 'enabled', False):
             def _show_floating():
-                # v3.9.2：延迟显示悬浮窗，带重试机制
+                # v1.0：延迟显示悬浮窗，带重试机制
                 # 确保 root 窗口已完全初始化后再创建 Toplevel
                 try:
                     from floating_window import get_floating
@@ -943,7 +943,7 @@ class FocusFlowApp:
 
     # ---------- 插件管理视图 ----------
     def _build_plugins_view(self, parent):
-        """插件管理视图（v3.1：可加载/卸载/重载/删除/编辑/查看视图，支持热加载）"""
+        """插件管理视图（v1.0：可加载/卸载/重载/删除/编辑/查看视图，支持热加载）"""
         self.plugins_view = ttk.Frame(parent, style='Card.TFrame')
         container = self.plugins_view
 
@@ -1575,7 +1575,7 @@ class FocusFlowApp:
     def toggle_floating(self):
         """切换悬浮窗显示/隐藏。
 
-        v3.9.2：增加异常保护和日志，确保切换可靠。
+        v1.0：增加异常保护和日志，确保切换可靠。
         """
         try:
             from floating_window import get_floating
@@ -1604,7 +1604,7 @@ class FocusFlowApp:
             # 更新年度下拉（轻量操作）
             self._update_year_combo()
 
-            # 今日活跃 = 键盘按键数（v3.9：纯键盘）
+            # 今日活跃 = 键盘按键数（v1.0：纯键盘）
             today = database.get_today_count()
             self.today_label.config(text=f"{today:,}")
 

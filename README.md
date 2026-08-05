@@ -3,7 +3,7 @@
 > 个人效率与专注力分析工具：键盘活跃统计 + 记账本 + 定时任务 + Edge 历史记录
 > 深色/亮色"液态玻璃"界面，纯本地存储，数据不上传任何服务器。
 
-![Version](https://img.shields.io/badge/version-3.11-blue)
+![Version](https://img.shields.io/badge/version-1.0-blue)
 ![Python](https://img.shields.io/badge/Python-3.13-green)
 ![Platform](https://img.shields.io/badge/Windows-10%2F11-blueviolet)
 
@@ -129,4 +129,4 @@ pyinstaller --noconfirm FocusFlow.spec
 
 ## 许可证
 
-本项目仅用于个人学习与效率管理，请勿用于商业用途。
+本项目采用 [MIT License](LICENSE) 开源。

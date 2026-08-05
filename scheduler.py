@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FocusFlow 定时任务模块（v3.1 增强）
+FocusFlow 定时任务模块（v1.0 增强）
 
 功能：
 - 定时启动指定程序（如 WeaselServer.exe）

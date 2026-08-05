@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
 echo ========================================
-echo   FocusFlow - Build Script v3.9
+echo   FocusFlow - Build Script v1.0
 echo ========================================
 echo.
 

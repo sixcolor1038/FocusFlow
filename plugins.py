@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FocusFlow 插件系统（v3.1 增强版）
+FocusFlow 插件系统（v1.0 增强版）
 
 功能：
 - 动态加载/卸载插件

@@ -13,7 +13,7 @@ FocusFlow 数据库模块（年度归档版 · 纯键盘统计）
 8. 自动备份 + VACUUM + 清理旧数据
 9. 批量写入失败自动重试 + 逐条兜底，保证数据不丢
 
-v3.9 变更：移除全部鼠标统计（mouse_stats 表 + 相关函数），
+v1.0 变更：移除全部鼠标统计（mouse_stats 表 + 相关函数），
           仅保留键盘按键统计。
 """
 
@@ -142,7 +142,7 @@ def init_db():
             'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
             ('year', str(year))
         )
-        # v3.9：移除 mouse_stats 表（不再统计鼠标数据）
+        # v1.0：移除 mouse_stats 表（不再统计鼠标数据）
         # 如果旧库中存在 mouse_stats 表，安全删除（不影响 key_log）
         try:
             cur = conn.execute(
@@ -150,7 +150,7 @@ def init_db():
             )
             if cur.fetchone() is not None:
                 conn.execute('DROP TABLE IF EXISTS mouse_stats')
-                log.info('已移除 mouse_stats 表（v3.9 不再统计鼠标数据）')
+                log.info('已移除 mouse_stats 表（v1.0 不再统计鼠标数据）')
         except Exception as me:
             log.debug('mouse_stats 清理检查: %s', me)
     log.info('数据库初始化完成: %s (年份=%d)', get_current_year_db_path(), year)
@@ -319,7 +319,7 @@ class _DBWriter:
             # 检查 flush 信号
             flush_requested = self._flush_event.is_set()
 
-            # v3.9 修复：flush 时先排空队列，避免遗漏未取出的按键
+            # v1.0 修复：flush 时先排空队列，避免遗漏未取出的按键
             if flush_requested:
                 while True:
                     try:
@@ -341,7 +341,7 @@ class _DBWriter:
                     self._flush_event.clear()
                     self._flush_done.set()
             elif flush_requested:
-                # v3.10 修复：队列为空时无需写入，但仍要清除信号，
+                # v1.0 修复：队列为空时无需写入，但仍要清除信号，
                 # 否则 _flush_event 一直置位，后续 flush_now(wait=True) 会误等 2 秒超时
                 self._flush_event.clear()
                 self._flush_done.set()
@@ -408,7 +408,7 @@ class _DBWriter:
     def _increment_today_count(self):
         """按键时递增今日计数（纯内存，不查 DB）
 
-        v3.9 修复：跨天/首次初始化时不再 return 而跳过递增，
+        v1.0 修复：跨天/首次初始化时不再 return 而跳过递增，
         否则会导致首次按键丢失（计数少 1）。
         """
         today = date.today()

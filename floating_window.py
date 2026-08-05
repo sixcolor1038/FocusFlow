@@ -6,7 +6,7 @@ FocusFlow 悬浮窗模块（画中画 · 健壮版）
 - 透明度可调
 - 双击打开主界面
 
-v3.9.2 健壮性增强：
+v1.0 健壮性增强：
 - show() 幂等化：重复调用不会创建多个刷新循环
 - winfo_exists() 检查：窗口被销毁后自动重建，不再报错
 - _build() 异常保护：构建失败时回滚，不留半成品
@@ -253,7 +253,7 @@ class FloatingWindow:
     def _refresh_loop(self):
         """定时刷新今日活跃数和 CPM。
 
-        v3.9.2：使用 _refresh_active 标志防止重复启动。
+        v1.0：使用 _refresh_active 标志防止重复启动。
         """
         if not self._refresh_active:
             return

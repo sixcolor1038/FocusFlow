@@ -42,7 +42,7 @@ def graceful_shutdown():
         except Exception as e:
             log.warning('停止键盘监听失败: %s', e)
 
-        # 1.5 销毁悬浮窗（v3.9.2：确保退出时清理）
+        # 1.5 销毁悬浮窗（v1.0：确保退出时清理）
         try:
             from floating_window import get_floating
             get_floating().destroy()
