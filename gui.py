@@ -1496,8 +1496,13 @@ class FocusFlowApp:
         except Exception:
             top.geometry("400x560")
         self._center_window(top)
-        # 居中完成后一次性显示
+        # 居中完成后一次性显示（避免可见闪烁）
         top.deiconify()
+        # 显示后再设置模态，确保 grab 生效
+        try:
+            top.grab_set()
+        except Exception:
+            pass
 
     def update_autostart_ui(self):
         # 开机自启已移入"设置"对话框，此处保留空实现以兼容旧调用
