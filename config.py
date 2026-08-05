@@ -17,7 +17,7 @@ from typing import Optional
 APP_NAME = "FocusFlow"
 APP_DISPLAY_NAME = "FocusFlow - 效率追踪器"
 APP_DESCRIPTION = "FocusFlow - 效率与专注力分析工具"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_AUTHOR = "FocusFlow"
 APP_UPDATE_DATE = "2026-08-06"
 
