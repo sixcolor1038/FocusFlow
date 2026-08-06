@@ -7,6 +7,9 @@ FocusFlow 开机自启模块（Windows）
 - 取消勾选     -> 删除该快捷方式
 - 任务管理器的"启动应用"里会显示为「已启用」，取消后即消失，符合用户直觉
 
+后台静默：所有 PowerShell 调用均带 CREATE_NO_WINDOW + -WindowStyle Hidden，
+不弹出任何控制台/终端窗口。
+
 说明：相比注册表 HKCU\\...\\Run 启动项，启动文件夹方式不会被
 Windows 11 的 StartupApproved 机制标记为"已禁用"，更可靠。
 """
@@ -28,6 +31,9 @@ RUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 # 旧方案的启动标记（需一并清理，避免残留"已禁用"状态）
 STARTUP_APPROVED_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 
+# 隐藏子进程窗口标志
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 
 def get_exe_path() -> str:
     if getattr(sys, 'frozen', False):
@@ -47,8 +53,21 @@ def _get_shortcut_path() -> str:
     return os.path.join(_get_startup_dir(), SHORTCUT_NAME)
 
 
+def _run_ps(ps_cmd: str) -> str:
+    """后台静默运行 PowerShell，返回 stdout"""
+    result = subprocess.run(
+        ['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+         '-ExecutionPolicy', 'Bypass', '-Command', ps_cmd],
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
+        stdin=subprocess.DEVNULL
+    )
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip() or f'PowerShell 执行失败 (code={result.returncode})')
+    return result.stdout
+
+
 def _create_shortcut():
-    """用 PowerShell WScript.Shell 创建启动快捷方式"""
+    """后台静默创建启动快捷方式"""
     exe = get_exe_path()
     workdir = os.path.dirname(exe)
     lnk = _get_shortcut_path()
@@ -62,35 +81,46 @@ def _create_shortcut():
         f"$s.Description = 'FocusFlow - 效率追踪器'; "
         f"$s.Save()"
     )
-    result = subprocess.run(
-        ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_cmd],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise OSError(result.stderr.strip() or f'PowerShell 创建快捷方式失败 (code={result.returncode})')
+    _run_ps(ps_cmd)
     return lnk
+
+
+def _get_shortcut_target() -> str:
+    """从 .lnk 文件内容中提取目标路径（不调用 PowerShell，快速且静默）"""
+    lnk = _get_shortcut_path()
+    if not os.path.isfile(lnk):
+        return ''
+    try:
+        data = open(lnk, 'rb').read()
+    except Exception:
+        return ''
+    if not data:
+        return ''
+    # .lnk 中会以 ASCII 明文保存完整的绝对路径（如 E:\software\...\FocusFlow.exe）
+    # 用盘符冒号反斜杠作为路径起点标识，向后匹配到 .exe
+    import re
+    matches = list(re.finditer(rb'[A-Za-z]:\\[^\x00]{1,300}\.exe', data))
+    if not matches:
+        return ''
+    for m in matches:
+        try:
+            candidate = m.group(0).decode('ascii')
+        except Exception:
+            continue
+        candidate = candidate.strip()
+        if candidate.endswith('.exe') and os.path.exists(candidate):
+            return candidate
+    return ''
 
 
 def _shortcut_points_to_exe() -> bool:
     """检查快捷方式是否指向当前 exe"""
-    lnk = _get_shortcut_path()
-    if not os.path.isfile(lnk):
+    if not os.path.isfile(_get_shortcut_path()):
         return False
-    exe = get_exe_path()
-    ps_cmd = (
-        f"$ws = New-Object -ComObject WScript.Shell; "
-        f"$s = $ws.CreateShortcut('{lnk}'); "
-        f"[Console]::Write($s.TargetPath)"
-    )
-    try:
-        result = subprocess.run(
-            ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_cmd],
-            capture_output=True, text=True
-        )
-        target = result.stdout.strip().strip('"')
-        return os.path.normcase(os.path.abspath(target)) == os.path.normcase(os.path.abspath(exe))
-    except Exception:
+    target = _get_shortcut_target()
+    if not target:
         return False
+    return os.path.normcase(os.path.abspath(target)) == os.path.normcase(os.path.abspath(get_exe_path()))
 
 
 # ---------- 清理旧的注册表方案（兼容/防止双重启动） ----------
