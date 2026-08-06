@@ -17,7 +17,7 @@ from typing import Optional
 APP_NAME = "FocusFlow"
 APP_DISPLAY_NAME = "FocusFlow - 效率追踪器"
 APP_DESCRIPTION = "FocusFlow - 效率与专注力分析工具"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_AUTHOR = "FocusFlow"
 APP_UPDATE_DATE = "2026-08-06"
 
@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
         'start_to_tray': 'false',      # 启动时直接进入系统托盘（不显示主窗口）
     },
     'hotkey': {
+        'enabled': 'false',              # 是否启用全局热键（默认关闭）
         'toggle_window': 'ctrl+shift+f',  # 显示/隐藏主窗口热键
     },
     'floating': {

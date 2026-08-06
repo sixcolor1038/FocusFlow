@@ -145,8 +145,14 @@ def get_hotkey_manager() -> GlobalHotkeyManager:
 
 
 def register_default_hotkey(callback: Callable[[], None]):
-    """注册默认的显示/隐藏窗口热键"""
+    """注册默认的显示/隐藏窗口热键（若在设置中关闭则跳过）"""
+    if not config.getbool('hotkey', 'enabled', False):
+        log.info('全局热键已关闭（设置中可开启）')
+        return
     hotkey_str = config.get('hotkey', 'toggle_window', 'ctrl+shift+f')
+    if not hotkey_str or not hotkey_str.strip():
+        log.info('全局热键未配置，跳过')
+        return
     get_hotkey_manager().register(hotkey_str, callback)
 
 

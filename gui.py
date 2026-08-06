@@ -1457,6 +1457,60 @@ class FocusFlowApp:
                         variable=tray_var,
                         command=_toggle_tray).pack(anchor='w', pady=3)
 
+        # ===== 全局热键 =====
+        ttk.Label(container, text="全局热键", style='Muted.TLabel').pack(anchor='w', pady=(8, 2))
+
+        hotkey_frame = ttk.Frame(container)
+        hotkey_frame.pack(anchor='w', pady=3)
+
+        # 启用/关闭 热键（Ctrl+Shift+F 显示/隐藏主窗口）
+        hotkey_enabled = tk.BooleanVar(value=config.getbool('hotkey', 'enabled', False))
+
+        def _sync_hotkey_state():
+            """根据启用状态应用/取消热键"""
+            try:
+                from hotkey import get_hotkey_manager, stop_hotkey
+                if hotkey_enabled.get():
+                    hotkey_combo.state(['!disabled'])
+                    # 先停止旧的，再注册新的
+                    stop_hotkey()
+                    from hotkey import get_hotkey_manager as _ghm
+                    _ghm().register(hotkey_combo.get(), self.toggle_window_visibility)
+                else:
+                    stop_hotkey()
+                    hotkey_combo.state(['disabled'])
+            except Exception as e:
+                log.debug('热键切换异常: %s', e)
+
+        def _toggle_hotkey():
+            config.set('hotkey', 'enabled', 'true' if hotkey_enabled.get() else 'false')
+            _sync_hotkey_state()
+
+        ttk.Checkbutton(hotkey_frame, text="启用全局热键（显示/隐藏主窗口）",
+                        variable=hotkey_enabled,
+                        command=_toggle_hotkey).pack(side=tk.LEFT)
+
+        # 热键组合选择
+        hotkey_var = tk.StringVar(value=config.get('hotkey', 'toggle_window', 'ctrl+shift+f'))
+        hotkey_combo = ttk.Combobox(hotkey_frame, textvariable=hotkey_var,
+                                    width=16, state='readonly',
+                                    values=['ctrl+shift+f', 'ctrl+alt+f', 'ctrl+alt+z',
+                                            'ctrl+shift+h', 'alt+shift+f'])
+        hotkey_combo.pack(side=tk.LEFT, padx=(12, 0))
+
+        def _on_hotkey_changed(event=None):
+            try:
+                config.set('hotkey', 'toggle_window', hotkey_combo.get())
+                if hotkey_enabled.get():
+                    _sync_hotkey_state()
+            except Exception as e:
+                log.debug('热键设置变更异常: %s', e)
+
+        hotkey_combo.bind('<<ComboboxSelected>>', _on_hotkey_changed)
+
+        # 初始化组合框状态
+        hotkey_combo.state(['disabled'] if not hotkey_enabled.get() else ['!disabled'])
+
         # ===== 数据操作 =====
         ttk.Separator(container, orient='horizontal').pack(fill=tk.X, pady=10)
         ttk.Label(container, text="数据操作", style='Muted.TLabel').pack(anchor='w', pady=(0, 6))
