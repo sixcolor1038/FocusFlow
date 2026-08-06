@@ -151,10 +151,18 @@ def _cleanup(days: int):
 
 
 def run_cli() -> int:
-    """解析命令行参数并执行，返回退出码"""
+    """解析命令行参数并执行，返回退出码
+
+    特殊参数：
+      --hidden  启动后直接进入系统托盘（供开机自启使用），不视为 CLI 命令
+    """
     args = sys.argv[1:]
+
+    # --hidden：开机自启等场景的"隐藏启动"标志，仅用于 GUI 模式，过滤掉再判断
+    args = [a for a in args if a != '--hidden']
+
     if not args:
-        return -1  # 无 CLI 参数，进入 GUI 模式
+        return -1  # 无 CLI 参数（或仅有 --hidden），进入 GUI 模式
 
     import database
     database.init_db()
