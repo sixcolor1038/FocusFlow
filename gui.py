@@ -1405,17 +1405,19 @@ class FocusFlowApp:
         ttk.Checkbutton(container, text="暗色模式", variable=dark_var,
                         command=_toggle_dark).pack(anchor='w', pady=3)
 
-        # 开机自启
+        # 开机自启（勾选=启用，取消勾选=关闭）
         from autostart import is_autostart_enabled, enable_autostart, disable_autostart
         auto_var = tk.BooleanVar(value=is_autostart_enabled())
 
         def _toggle_auto():
-            if is_autostart_enabled():
-                disable_autostart()
-                auto_var.set(False)
+            # tkinter 会先切换 auto_var 再调用 command，因此这里直接按新勾选状态执行
+            if auto_var.get():
+                ok, msg = enable_autostart()
             else:
-                enable_autostart()
-                auto_var.set(True)
+                ok, msg = disable_autostart()
+            if not ok:
+                messagebox.showerror("开机自启", msg, parent=top)
+                auto_var.set(is_autostart_enabled())
             self.update_autostart_ui()
 
         ttk.Checkbutton(container, text="开机自启", variable=auto_var,
