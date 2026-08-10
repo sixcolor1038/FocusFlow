@@ -178,8 +178,42 @@ except Exception as _e:
 
 
 # ==================== 单实例检查（Windows）====================
+def _activate_existing_window():
+    """尝试把已运行的 FocusFlow 主窗口调到前台并还原
+
+    当用户重复双击/启动时，不再只是弹一个可能被挡住的对话框，
+    而是把已打开的窗口带到最前，让用户直接看到它。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        WNDENUMPROC = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _callback(hwnd, lparam):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value or ''
+                if title.startswith(APP_DISPLAY_NAME) or title.startswith('FocusFlow'):
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                    user32.SetForegroundWindow(hwnd)
+                    return False  # 找到即停止枚举
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_callback), 0)
+    except Exception as e:
+        log_main.debug('激活已有窗口失败: %s', e)
+
+
 def check_single_instance() -> bool:
-    """检查是否已有实例在运行"""
+    """检查是否已有实例在运行
+
+    若已有实例：激活其主窗口并弹置顶提示，返回 False。
+    """
     try:
         import ctypes
         from ctypes import wintypes
@@ -188,8 +222,17 @@ def check_single_instance() -> bool:
         CreateMutex.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
         CreateMutex.restype = wintypes.HANDLE
         ERROR_ALREADY_EXISTS = 183
+        MB_TOPMOST = 0x00040000
         mutex = CreateMutex(None, True, mutex_name)
         if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+            # 已有实例在运行：把已有窗口调到前台，并给出清晰的置顶提示
+            _activate_existing_window()
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "FocusFlow 已经在运行了，已帮你把它的窗口调到前台。\n"
+                "如需完全重启，请先在托盘图标右键选择「退出程序」。",
+                "FocusFlow - 已在运行",
+                MB_TOPMOST)
             return False
         global _mutex_handle
         _mutex_handle = mutex
