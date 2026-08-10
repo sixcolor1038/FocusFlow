@@ -1,4 +1,14 @@
-# FocusFlow - 效率追踪器 v1.2.1 使用说明
+# FocusFlow - 效率追踪器 v1.2.2 使用说明
+
+## v1.2.2 更新亮点（更流畅 · 更省内存 · 体积更小）
+
+### 0. 打包方式改为文件夹模式（onedir）
+- **原因**：旧版单文件(exe)每次启动都需把约 19MB 压缩包解压到临时目录，任务管理器会同时出现"引导器 + 程序"两个进程，启动慢、内存占用高
+- **调整**：改用文件夹模式打包，运行只一个进程、无需临时解压，启动更快、内存占用更低
+- **体积更小**：发布压缩包由约 19MB 降至约 14.5MB
+- 运行方式：解压后双击 `FocusFlow\FocusFlow.exe`（整个文件夹需保持完整，勿单独移动 exe）
+
+---
 
 ## v1.2.1 更新亮点（组合键按物理键独立计数）
 
@@ -307,7 +317,7 @@ FocusFlow.exe --reset              # 清空所有记录（需二次确认）
 ## 在新电脑上部署（免安装）
 
 **直接用软件包即可运行，无需安装任何环境：**
-- `FocusFlow.exe` 是单文件自包含程序（PyInstaller 打包），已内置 Python 运行库、Tkinter、以及 pynput / pystray / Pillow 等全部依赖
+- `FocusFlow` 为文件夹打包（PyInstaller onedir），内含 exe 与 `_internal` 依赖，已内置 Python 运行库、Tkinter、以及 pynput / pystray / Pillow 等全部依赖
 - 新电脑上**不需要安装 Python**，也不需要 pip 安装任何库
 - 使用方法：把 zip 解压到任意文件夹（建议放在普通用户文件夹，如 `D:\FocusFlow`），双击 `FocusFlow.exe` 即可
 

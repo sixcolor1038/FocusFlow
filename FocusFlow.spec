@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""FocusFlow PyInstaller spec 文件（精简版 - 无 matplotlib）
+"""FocusFlow PyInstaller spec 文件（精简版 - 无 matplotlib · onedir 文件夹模式）
 
-用法：pyinstaller FocusFlow.spec
+说明：
+- 采用 onedir（文件夹）模式：单进程、启动快（无需每次解压）、内存占用更低
+- 排除无用大模块，进一步减小体积
+- 用法：pyinstaller FocusFlow.spec
 """
 
 import os
@@ -74,7 +77,7 @@ a = Analysis(
     hookspath=[os.path.join(SPEC_DIR, 'hooks')],
     hooksconfig={},
     runtime_hooks=[],
-    # 排除不需要的大模块（减小体积）
+    # 排除不需要的大模块（减小体积 / 降低内存）
     excludes=[
         'tkinter.test', 'unittest', 'test', 'pydoc.data',
         'matplotlib', 'numpy', 'pandas', 'scipy',
@@ -84,6 +87,12 @@ a = Analysis(
         'pydoc', 'doctest', 'argparse',
         'distutils', 'setuptools', 'pip',
         'Cython', 'numpy.tests', 'pandas.tests',
+        # 额外排除的纯打包/开发模块
+        'idlelib', 'lib2to3', 'ensurepip', 'venv',
+        'turtle', 'turtledemo', 'msilib', 'pydoc_data',
+        # 本应用完全本地、无网络，也不需要 AVIF 图片编解码，
+        # 排除 AVIF 与 ssl 以减小体积（_avif.pyd ~7.5MB、ssl 相关 ~1MB）
+        'ssl', '_ssl', 'PIL._avif',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -93,18 +102,17 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# onedir 模式：exe 内只放引导 + PYZ，其余二进制/数据由 COLLECT 放到文件夹
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='FocusFlow',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -116,3 +124,15 @@ exe = EXE(
     icon='focusflow.ico',
     version='version_info.txt',
 )
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='FocusFlow',
+)
+

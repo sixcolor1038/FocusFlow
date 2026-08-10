@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
 echo ========================================
-echo   FocusFlow - Build Script v1.1
+echo   FocusFlow - Build Script v1.3 (onedir)
 echo ========================================
 echo.
 
@@ -64,7 +64,7 @@ if errorlevel 1 (
     echo.
     echo Build with spec failed, trying command line...
     echo.
-    pyinstaller --noconfirm --onefile --windowed ^
+    pyinstaller --noconfirm --onedir --windowed ^
         --name FocusFlow ^
         --icon focusflow.ico ^
         --version-file version_info.txt ^
@@ -131,7 +131,7 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo   Build Complete!
-echo   Output: dist\FocusFlow.exe
+echo   Output: dist\FocusFlow\FocusFlow.exe (文件夹模式)
 echo ========================================
 echo.
 pause
