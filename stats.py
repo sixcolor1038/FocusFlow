@@ -27,7 +27,9 @@ class CPMCalculator:
 
     def __init__(self, window: int):
         self.window = window
-        self._timestamps: deque = deque()
+        # maxlen 作为硬上限安全阀：正常情况下按 window 秒清空，
+        # 即使极端高频输入也不会无限增长内存
+        self._timestamps: deque = deque(maxlen=100000)
         self._lock = threading.Lock()
         self._cached_cpm = 0
         self._cached_at = 0.0

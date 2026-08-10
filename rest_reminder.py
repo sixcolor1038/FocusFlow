@@ -28,7 +28,8 @@ class RestReminder:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._timestamps: deque = deque()
+        # maxlen 作为硬上限安全阀：正常情况下按 window_minutes 清空，极端输入也不会无限增长
+        self._timestamps: deque = deque(maxlen=100000)
         self._enabled = config.getbool('rest', 'enabled', True)
         self._window_minutes = max(1, config.getint('rest', 'window_minutes', 30))
         self._threshold = max(1, config.getint('rest', 'key_threshold', 10000))

@@ -247,6 +247,7 @@ class FocusFlowApp:
         self.current_date: Optional[date] = None
         self.current_year: Optional[int] = None
         self._quitting = False
+        self._gc_tick_count = 0
         self._theme = config.get('gui', 'theme', 'light')
         self._trend_canvas = None
         self._trend_data = []  # 缓存趋势数据，避免重复查询
@@ -2154,6 +2155,13 @@ class FocusFlowApp:
             database.flush_now(wait=False)
             self.refresh_stats(full=True)
             self._refresh_summary()
+            # 周期性手动回收：Tkinter 长时间运行会产生少量循环引用，
+            # Python 的 gc 默认分代收集不一定及时回收，这里约每 30 秒强制一次
+            self._gc_tick_count += 1
+            if self._gc_tick_count >= 3:
+                self._gc_tick_count = 0
+                import gc
+                gc.collect()
         except Exception as e:
             log.debug('全量刷新异常: %s', e)
         interval = config.getint('gui', 'full_refresh_interval', 10) * 1000

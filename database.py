@@ -313,7 +313,9 @@ class _DBWriter:
     def __init__(self, batch_size: int, flush_interval: int):
         self.batch_size = batch_size
         self.flush_interval = flush_interval
-        self._queue: 'queue.Queue[Tuple[str, int]]' = queue.Queue()
+        # 有界队列：极端情况下（磁盘慢/写入阻塞）也不会让内存无限增长
+        self._max_queue = 5000
+        self._queue: 'queue.Queue[Tuple[str, int]]' = queue.Queue(maxsize=self._max_queue)
         self._stop_event = threading.Event()
         self._flush_event = threading.Event()  # 立即 flush 信号
         self._flush_done = threading.Event()   # flush 完成信号
@@ -346,6 +348,16 @@ class _DBWriter:
     def put(self, key_name: str, timestamp: int):
         try:
             self._queue.put_nowait((key_name, timestamp))
+        except queue.Full:
+            # 队列已满（写入线程暂时阻塞）：丢弃最旧的一条，防止内存无限增长
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait((key_name, timestamp))
+            except queue.Full:
+                pass
         except Exception as e:
             log.error('投递按键到队列失败: %s', e)
         self._increment_today_count()
@@ -354,46 +366,53 @@ class _DBWriter:
         last_flush = time.time()
         batch = []
         while not self._stop_event.is_set():
-            # 用较短的超时轮询，以便及时响应 flush 信号
-            timeout = 0.5
+            # 健壮性：单次异常不终止线程，避免写入线程意外退出导致队列无限堆积
             try:
-                item = self._queue.get(timeout=timeout)
-                if item is None:
-                    # 哨兵：退出信号
-                    break
-                batch.append(item)
-            except queue.Empty:
-                pass
-
-            # 检查 flush 信号
-            flush_requested = self._flush_event.is_set()
-
-            # v1.0 修复：flush 时先排空队列，避免遗漏未取出的按键
-            if flush_requested:
-                while True:
-                    try:
-                        item = self._queue.get_nowait()
-                        if item is None:
-                            break
-                        batch.append(item)
-                    except queue.Empty:
+                # 用较短的超时轮询，以便及时响应 flush 信号
+                timeout = 0.5
+                try:
+                    item = self._queue.get(timeout=timeout)
+                    if item is None:
+                        # 哨兵：退出信号
                         break
+                    batch.append(item)
+                except queue.Empty:
+                    pass
 
-            now = time.time()
-            if (len(batch) >= self.batch_size
-                or (batch and now - last_flush >= self.flush_interval)
-                or (batch and flush_requested)):
-                self._write_batch(batch)
-                batch = []
-                last_flush = now
+                # 检查 flush 信号
+                flush_requested = self._flush_event.is_set()
+
+                # v1.0 修复：flush 时先排空队列，避免遗漏未取出的按键
                 if flush_requested:
+                    while True:
+                        try:
+                            item = self._queue.get_nowait()
+                            if item is None:
+                                break
+                            batch.append(item)
+                        except queue.Empty:
+                            break
+
+                now = time.time()
+                if (len(batch) >= self.batch_size
+                    or (batch and now - last_flush >= self.flush_interval)
+                    or (batch and flush_requested)):
+                    self._write_batch(batch)
+                    batch = []
+                    last_flush = now
+                    if flush_requested:
+                        self._flush_event.clear()
+                        self._flush_done.set()
+                elif flush_requested:
+                    # v1.0 修复：队列为空时无需写入，但仍要清除信号，
+                    # 否则 _flush_event 一直置位，后续 flush_now(wait=True) 会误等 2 秒超时
                     self._flush_event.clear()
                     self._flush_done.set()
-            elif flush_requested:
-                # v1.0 修复：队列为空时无需写入，但仍要清除信号，
-                # 否则 _flush_event 一直置位，后续 flush_now(wait=True) 会误等 2 秒超时
-                self._flush_event.clear()
-                self._flush_done.set()
+            except Exception as e:
+                log.error('DB 写入线程异常（已忽略继续运行）: %s', e, exc_info=True)
+                # 避免异常导致死循环，稍作停顿
+                import time as _t
+                _t.sleep(0.2)
 
         # 退出前 flush 残留
         if batch:

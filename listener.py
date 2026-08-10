@@ -208,6 +208,12 @@ class InputListener:
         """
         now = time.time()
         with self._pressed_lock:
+            # 安全阀：字典过大时，先清理超过"视为已释放"时长、且未收到 release 的残留按键
+            if len(self._pressed) > 256:
+                stale = [k for k, t in self._pressed.items()
+                         if now - t > self._hold_stale_seconds]
+                for k in stale:
+                    self._pressed.pop(k, None)
             last = self._pressed.get(key_name)
             if last is None or now - last > self._hold_stale_seconds:
                 self._pressed[key_name] = now
