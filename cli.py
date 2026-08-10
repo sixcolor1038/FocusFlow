@@ -46,13 +46,13 @@ def _print_stats(days_str: str):
     print(f"{'=' * 50}")
     print(f"  总活跃次数: {total:,}")
     print(f"{'-' * 50}")
-    print(f"  {'排名':<6}{'按键':<12}{'次数':<12}{'占比':<10}")
+    print(f"  {'排名':<6}{'键鼠':<12}{'次数':<12}{'占比':<10}")
     print(f"  {'-' * 40}")
     for rank, (key_name, count) in enumerate(key_stats.items(), 1):
         percent = f"{count / total * 100:.1f}%" if total > 0 else '0%'
         print(f"  {rank:<6}{key_name:<12}{count:<12,}{percent:<10}")
         if rank >= 20:
-            print(f"  ... 共 {len(key_stats)} 种按键")
+            print(f"  ... 共 {len(key_stats)} 种键鼠")
             break
     print(f"{'=' * 50}\n")
     return 0

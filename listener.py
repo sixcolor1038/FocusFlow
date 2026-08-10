@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-FocusFlow 键盘监听模块
-- 暂停/恢复
-- 修饰键过滤
+FocusFlow 键鼠监听模块
+- 键盘监听：暂停/恢复、修饰键过滤、长按自动重复过滤
+- 鼠标监听：左/右/中键、侧键点击，滚轮滚动（连续滚动合并，避免虚高）
 - 全局异常保护
 """
 
@@ -10,13 +10,13 @@ import time
 import threading
 from typing import Optional, Callable, List, Dict
 
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 from config import config
 from logger import get_logger
 
 # 延迟导入 database 和 stats，避免启动时强耦合
-# 这两个模块在 _on_press 中按需导入
+# 这两个模块在 _record_event 中按需导入
 log = get_logger('listener')
 
 
@@ -100,11 +100,32 @@ def normalize_key(key) -> str:
     return SPECIAL_KEY_MAP.get(key_str, key_str)
 
 
-class KeyListener:
-    """键盘监听器，支持暂停/恢复和按键过滤"""
+# 鼠标按键名映射（pynput mouse.Button -> 显示名）
+_MOUSE_BUTTON_MAP = {
+    mouse.Button.left: '鼠标左键',
+    mouse.Button.right: '鼠标右键',
+    mouse.Button.middle: '鼠标中键',
+    mouse.Button.x1: '鼠标侧键后退',
+    mouse.Button.x2: '鼠标侧键前进',
+}
+
+
+def normalize_mouse_button(button) -> str:
+    """规范化鼠标按键名"""
+    return _MOUSE_BUTTON_MAP.get(button, f'鼠标{getattr(button, "name", button)}')
+
+
+def scroll_direction(dy: int) -> str:
+    """滚轮方向：dy>0 向上滚，dy<0 向下滚"""
+    return '上' if dy > 0 else '下'
+
+
+class InputListener:
+    """键盘+鼠标监听器，支持暂停/恢复、按键过滤和滚轮合并"""
 
     def __init__(self):
         self._listener: Optional[keyboard.Listener] = None
+        self._mouse_listener: Optional[mouse.Listener] = None
         self._paused = False
         self._pause_lock = threading.Lock()
         self._pause_callbacks: List[Callable[[bool], None]] = []
@@ -121,16 +142,25 @@ class KeyListener:
         # 正常长按的自动重复间隔远小于此值，因此长按期间的重复事件都会被过滤；
         # 仅当 release 丢失且超过此值后才允许重新计数，兼顾抑制虚高与避免漏计。
         self._hold_stale_seconds = config.getfloat('listener', 'key_repeat_stale_seconds', 15.0)
-        log.info('监听器初始化 (ignore_modifiers=%s, ignore_functions=%s, ignore_key_repeat=%s, stale=%.0fs)',
+        # 鼠标统计开关
+        self._mouse_enabled = config.getbool('listener', 'mouse_enabled', True)
+        # 滚轮连续滚动合并窗口（秒）：窗口内同方向的连续滚动只计 1 次，
+        # 避免"滚轮滑一会儿"直接累加成十几次虚高
+        self._scroll_burst_window = config.getfloat('listener', 'scroll_burst_window', 0.8)
+        self._scroll_lock = threading.Lock()
+        self._last_scroll_ts = 0.0
+        self._last_scroll_dir = ''
+        log.info('监听器初始化 (ignore_modifiers=%s, ignore_functions=%s, ignore_key_repeat=%s, '
+                 'stale=%.0fs, mouse_enabled=%s, scroll_window=%.1fs)',
                  self._ignore_modifiers, self._ignore_functions, self._ignore_key_repeat,
-                 self._hold_stale_seconds)
+                 self._hold_stale_seconds, self._mouse_enabled, self._scroll_burst_window)
 
     def add_pause_callback(self, cb: Callable[[bool], None]):
         """注册暂停状态变化回调"""
         self._pause_callbacks.append(cb)
 
     def add_key_callback(self, cb: Callable[[str], None]):
-        """注册按键回调（每个有效按键触发一次，用于番茄钟计数 / 高强度输入检测等）"""
+        """注册输入回调（每个有效键鼠事件触发一次，用于番茄钟计数 / 高强度输入检测等）"""
         if cb not in self._key_callbacks:
             self._key_callbacks.append(cb)
 
@@ -143,10 +173,13 @@ class KeyListener:
             if self._paused == paused:
                 return
             self._paused = paused
-        # 暂停时清空按下状态，避免恢复后误判长按
+        # 暂停时清空按下状态与滚轮合并状态，避免恢复后误判长按/误合并
         if paused:
             with self._pressed_lock:
                 self._pressed.clear()
+            with self._scroll_lock:
+                self._last_scroll_ts = 0.0
+                self._last_scroll_dir = ''
         log.info('监听已 %s', '暂停' if paused else '恢复')
         for cb in self._pause_callbacks:
             try:
@@ -183,27 +216,44 @@ class KeyListener:
                 return True
             return False
 
+    def _is_new_scroll_burst(self, direction: str) -> bool:
+        """判断是否开启一次新的滚轮滚动（连续滚动合并）
+
+        窗口内同方向的连续滚动只计 1 次；换方向或超过窗口时长则算新一次。
+        """
+        now = time.time()
+        with self._scroll_lock:
+            is_new = (now - self._last_scroll_ts > self._scroll_burst_window) \
+                     or (direction != self._last_scroll_dir)
+            self._last_scroll_ts = now
+            self._last_scroll_dir = direction
+            return is_new
+
+    def _record_event(self, key_name: str):
+        """记录一次输入事件（键盘/鼠标统一入口）"""
+        if self.is_paused():
+            return
+        # 延迟导入，避免循环依赖和启动耦合
+        import database
+        import stats
+        database.record_key(key_name)
+        stats.record_cpm()
+        # 通知输入回调（番茄钟 / 高强度输入检测等）
+        for cb in self._key_callbacks:
+            try:
+                cb(key_name)
+            except Exception as e:
+                log.debug('输入回调异常: %s', e)
+
     def _on_press(self, key):
         try:
-            if self.is_paused():
-                return
             key_name = normalize_key(key)
             if self._should_filter(key_name):
                 return
             # 长按自动重复过滤：按住期间重复触发的事件不计入按键数
             if self._ignore_key_repeat and not self._is_new_press(key_name):
                 return
-            # 延迟导入，避免循环依赖和启动耦合
-            import database
-            import stats
-            database.record_key(key_name)
-            stats.record_cpm()
-            # 通知按键回调（番茄钟 / 高强度输入检测等）
-            for cb in self._key_callbacks:
-                try:
-                    cb(key_name)
-                except Exception as e:
-                    log.debug('按键回调异常: %s', e)
+            self._record_event(key_name)
         except Exception as e:
             log.error('on_press 异常: %s', e, exc_info=True)
 
@@ -215,6 +265,27 @@ class KeyListener:
         except Exception as e:
             log.debug('on_release 异常: %s', e)
 
+    def _on_click(self, x, y, button, pressed):
+        try:
+            if not pressed:
+                return
+            key_name = normalize_mouse_button(button)
+            self._record_event(key_name)
+        except Exception as e:
+            log.error('on_click 异常: %s', e, exc_info=True)
+
+    def _on_scroll(self, x, y, dx, dy):
+        try:
+            if dy == 0:
+                return
+            direction = scroll_direction(dy)
+            # 连续滚动合并：短时间内的连续滚动只计 1 次
+            if not self._is_new_scroll_burst(direction):
+                return
+            self._record_event(f'滚轮{direction}滑')
+        except Exception as e:
+            log.error('on_scroll 异常: %s', e, exc_info=True)
+
     def start(self):
         if self._listener and self._listener.is_alive():
             return
@@ -222,25 +293,42 @@ class KeyListener:
                                            on_release=self._on_release)
         self._listener.daemon = True
         self._listener.start()
-        log.info('键盘监听已启动')
+        if self._mouse_enabled:
+            try:
+                self._mouse_listener = mouse.Listener(on_click=self._on_click,
+                                                      on_scroll=self._on_scroll)
+                self._mouse_listener.daemon = True
+                self._mouse_listener.start()
+            except Exception as e:
+                log.warning('鼠标监听启动失败: %s', e)
+        log.info('键鼠监听已启动 (keyboard=%s, mouse=%s)',
+                 self._listener.is_alive(),
+                 bool(self._mouse_listener and self._mouse_listener.is_alive())
+                 if self._mouse_enabled else False)
 
     def stop(self):
         if self._listener:
             try:
                 self._listener.stop()
             except Exception as e:
-                log.warning('停止监听异常: %s', e)
+                log.warning('停止键盘监听异常: %s', e)
             self._listener = None
+        if self._mouse_listener:
+            try:
+                self._mouse_listener.stop()
+            except Exception as e:
+                log.warning('停止鼠标监听异常: %s', e)
+            self._mouse_listener = None
 
 
 # 全局实例
-_listener: Optional[KeyListener] = None
+_listener: Optional[InputListener] = None
 
 
-def get_listener() -> KeyListener:
+def get_listener() -> InputListener:
     global _listener
     if _listener is None:
-        _listener = KeyListener()
+        _listener = InputListener()
     return _listener
 
 

@@ -98,11 +98,11 @@ def get_view(parent):
     # 右侧：按键统计联动
     right = ttk.Frame(inner)
     right.pack(side=tk.RIGHT)
-    keys_lbl = ttk.Label(right, text="本番茄钟按键：0", font=("Segoe UI", 11, "bold"))
+    keys_lbl = ttk.Label(right, text="本番茄钟键鼠：0", font=("Segoe UI", 11, "bold"))
     keys_lbl.pack(anchor='e')
-    today_lbl = ttk.Label(right, text="今日番茄钟：0 个 · 0 键", style='Subtitle.TLabel')
+    today_lbl = ttk.Label(right, text="今日番茄钟：0 个 · 0 次", style='Subtitle.TLabel')
     today_lbl.pack(anchor='e')
-    speed_lbl = ttk.Label(right, text="平均速度：-- 键/分", style='Subtitle.TLabel')
+    speed_lbl = ttk.Label(right, text="平均速度：-- 次/分", style='Subtitle.TLabel')
     speed_lbl.pack(anchor='e')
 
     # 按钮栏
@@ -149,7 +149,7 @@ def get_view(parent):
     tree.heading('type', text='类型')
     tree.heading('start', text='开始时间')
     tree.heading('duration', text='实际时长')
-    tree.heading('keys', text='按键数')
+    tree.heading('keys', text='键鼠数')
     tree.column('id', width=50, anchor='center')
     tree.column('type', width=60, anchor='center')
     tree.column('start', width=160, anchor='center')
@@ -175,7 +175,7 @@ def get_view(parent):
             state_cn = _STATE_TEXT.get(state, state)
             state_lbl.config(text=state_cn)
             time_lbl.config(text=_fmt(remaining))
-            keys_lbl.config(text=f"本番茄钟按键：{key_count:,}")
+            keys_lbl.config(text=f"本番茄钟键鼠：{key_count:,}")
             info = timer.get_state_info()
             if state == _pomo.STATE_IDLE:
                 hint_lbl.config(text="点击「开始工作」开始一个番茄钟")
@@ -200,10 +200,10 @@ def get_view(parent):
             summary = _pomo.get_today_summary()
             if summary.get('count', 0) > 0:
                 avg_speed = summary['total_keys'] / max(1, summary['total_seconds'] / 60.0)
-                speed_lbl.config(text=f"今日按键 {summary['total_keys']:,} · 均速 {avg_speed:.0f} 键/分")
-                today_lbl.config(text=f"今日番茄钟：{summary['count']} 个 · {summary['total_keys']:,} 键")
+                speed_lbl.config(text=f"今日键鼠 {summary['total_keys']:,} · 均速 {avg_speed:.0f} 次/分")
+                today_lbl.config(text=f"今日番茄钟：{summary['count']} 个 · {summary['total_keys']:,} 次")
             else:
-                speed_lbl.config(text="平均速度：-- 键/分")
+                speed_lbl.config(text="平均速度：-- 次/分")
                 today_lbl.config(text=f"今日番茄钟：{info['work_finished']} 个")
         except Exception:
             pass

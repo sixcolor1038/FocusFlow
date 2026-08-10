@@ -17,9 +17,9 @@ from typing import Optional
 APP_NAME = "FocusFlow"
 APP_DISPLAY_NAME = "FocusFlow - 效率追踪器"
 APP_DESCRIPTION = "FocusFlow - 效率与专注力分析工具"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.2.0"
 APP_AUTHOR = "FocusFlow"
-APP_UPDATE_DATE = "2026-08-06"
+APP_UPDATE_DATE = "2026-08-10"
 
 
 def get_app_dir() -> str:
@@ -59,6 +59,8 @@ DEFAULT_CONFIG = {
         'ignore_function_keys': 'false',  # 是否忽略 F1-F12
         'ignore_key_repeat': 'true',      # 是否过滤长按自动重复（游戏/长按某键时不重复计数）
         'key_repeat_stale_seconds': '15', # release 丢失后，超过该秒数才允许重新计数
+        'mouse_enabled': 'true',          # 是否统计鼠标操作（左/右/中键、侧键、滚轮）
+        'scroll_burst_window': '0.8',     # 滚轮连续滚动合并窗口（秒）：窗口内连续滚动只计 1 次
     },
     'gui': {
         'refresh_interval': '2',       # GUI 增量刷新间隔（秒）

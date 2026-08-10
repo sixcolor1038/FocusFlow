@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FocusFlow 数据库模块（年度归档版 · 纯键盘统计）
+FocusFlow 数据库模块（年度归档版 · 键鼠统计）
 
 核心设计：
 1. 按年份拆分数据库文件：data/focusflow_YYYY.db
@@ -13,8 +13,8 @@ FocusFlow 数据库模块（年度归档版 · 纯键盘统计）
 8. 自动备份 + VACUUM + 清理旧数据
 9. 批量写入失败自动重试 + 逐条兜底，保证数据不丢
 
-v1.0 变更：移除全部鼠标统计（mouse_stats 表 + 相关函数），
-          仅保留键盘按键统计。
+v1.2 变更：重新启用键鼠统计，鼠标操作（点击/滚轮）与键盘按键统一
+           写入 key_log 表（key_name 区分），无需独立 mouse_stats 表。
 """
 
 import os
@@ -142,15 +142,15 @@ def init_db():
             'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
             ('year', str(year))
         )
-        # v1.0：移除 mouse_stats 表（不再统计鼠标数据）
-        # 如果旧库中存在 mouse_stats 表，安全删除（不影响 key_log）
+        # 兼容清理：若旧版本（v1.0 之前）存在独立的 mouse_stats 表，安全删除，
+        # 不影响 key_log（键鼠数据现在统一写入 key_log，用 key_name 区分）
         try:
             cur = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='mouse_stats'"
             )
             if cur.fetchone() is not None:
                 conn.execute('DROP TABLE IF EXISTS mouse_stats')
-                log.info('已移除 mouse_stats 表（v1.0 不再统计鼠标数据）')
+                log.info('已移除遗留的 mouse_stats 表（键鼠数据统一存入 key_log）')
         except Exception as me:
             log.debug('mouse_stats 清理检查: %s', me)
     log.info('数据库初始化完成: %s (年份=%d)', get_current_year_db_path(), year)

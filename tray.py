@@ -3,7 +3,7 @@
 FocusFlow 系统托盘模块
 - 暂停/恢复菜单
 - 暂停时图标变灰
-- tooltip 显示"今日活跃 X,XXX 次 | 速度 XX 键/分 | [已暂停]"
+- tooltip 显示"今日活跃 X,XXX 次 | 速度 XX 次/分 | [已暂停]"
 - 显示/隐藏主窗口
 - 显示/隐藏悬浮窗
 """
@@ -109,7 +109,7 @@ class TrayController:
                 today = database.get_today_count()
                 cpm = stats.get_current_cpm()
                 paused = get_listener().is_paused()
-                tip = f"今日活跃 {today:,} 次 | 速度 {cpm} 键/分"
+                tip = f"今日活跃 {today:,} 次 | 速度 {cpm} 次/分"
                 if paused:
                     tip += " | [已暂停]"
                 if self._icon:

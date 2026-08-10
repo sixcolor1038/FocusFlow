@@ -212,6 +212,10 @@ class GlassFrame(tk.Frame):
 # ==================== 按键分组 ====================
 def classify_key(key_name: str) -> str:
     """将按键/鼠标操作分类"""
+    if key_name.startswith('滚轮'):
+        return '滚轮'
+    if key_name.startswith('鼠标'):
+        return '鼠标点击'
     if key_name in ('Shift', '左Shift', '右Shift', 'Ctrl', '左Ctrl', '右Ctrl',
                     'Alt', '左Alt', '右Alt', 'Win', '左Win', '右Win'):
         return '修饰键'
@@ -227,7 +231,8 @@ def classify_key(key_name: str) -> str:
     return '其他'
 
 
-KEY_GROUP_ORDER = ['字母键', '数字键', '功能键', '修饰键', '编辑键', '其他']
+KEY_GROUP_ORDER = ['字母键', '数字键', '功能键', '修饰键', '编辑键',
+                   '鼠标点击', '滚轮', '其他']
 
 
 # ==================== 主应用 ====================
@@ -660,7 +665,7 @@ class FocusFlowApp:
         col2 = ttk.Frame(hero_inner, style='Card.TFrame')
         col2.pack(side=tk.LEFT, padx=(0, 44))
         ttk.Label(col2, text="当前速度", style='Subtitle.TLabel').pack(anchor='w')
-        self.cpm_label = ttk.Label(col2, text="0 键/分", style='BigStat.TLabel')
+        self.cpm_label = ttk.Label(col2, text="0 次/分", style='BigStat.TLabel')
         self.cpm_label.pack(anchor='w')
 
         # 周期总数
@@ -727,10 +732,10 @@ class FocusFlowApp:
                    command=self.on_today_click).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(row2, text="视图", style='Stat.TLabel').pack(side=tk.LEFT, padx=(22, 0))
-        self.view_var = tk.StringVar(value="按键排行")
+        self.view_var = tk.StringVar(value="键鼠排行")
         self.view_combo = ttk.Combobox(row2, textvariable=self.view_var,
                                        state='readonly', width=14,
-                                       values=["按键排行", "分组统计", "趋势图",
+                                       values=["键鼠排行", "分组统计", "趋势图",
                                                "小时分布", "星期分布",
                                                "插件管理"])
         self.view_combo.pack(side=tk.LEFT, padx=(6, 0))
@@ -750,16 +755,16 @@ class FocusFlowApp:
         self._build_weekday_view(self.display_area)
         self._build_plugins_view(self.display_area)
 
-        # 默认显示按键排行
+        # 默认显示键鼠排行
         self._current_view = None
-        self._show_view("按键排行")
+        self._show_view("键鼠排行")
 
         # ===== 内容区（液态玻璃卡片） =====
         self.display_area = GlassFrame(self.root, kind='card', radius=16)
         self.display_area.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 16))
 
     def _build_rank_view(self, parent):
-        """按键排行表格（纯键盘按键排行）"""
+        """键鼠排行表格（键盘+鼠标合并排行）"""
         self.rank_view = ttk.Frame(parent, style='Card.TFrame')
 
         container = self.rank_view
@@ -767,11 +772,11 @@ class FocusFlowApp:
         self.tree = ttk.Treeview(container, columns=columns, show='headings',
                                  selectmode='browse')
         self.tree.heading('rank', text='排名')
-        self.tree.heading('key', text='按键')
+        self.tree.heading('key', text='键鼠')
         self.tree.heading('count', text='次数')
         self.tree.heading('percent', text='占比')
         self.tree.column('rank', width=80, anchor='center')
-        self.tree.column('key', width=150, anchor='center')
+        self.tree.column('key', width=170, anchor='center')
         self.tree.column('count', width=120, anchor='w')
         self.tree.column('percent', width=100, anchor='center')
 
@@ -788,7 +793,7 @@ class FocusFlowApp:
         vsb.pack(side=tk.RIGHT, fill=tk.Y, pady=12)
 
     def _on_rank_right_click(self, event):
-        """按键排行右键菜单"""
+        """键鼠排行右键菜单"""
         try:
             row = self.tree.identify_row(event.y)
             if not row:
@@ -796,7 +801,7 @@ class FocusFlowApp:
             self.tree.selection_set(row)
             self.tree.focus(row)
             menu = tk.Menu(self.root, tearoff=0)
-            menu.add_command(label="清除该按键今日次数", command=self.clear_today_key)
+            menu.add_command(label="清除该键鼠今日次数", command=self.clear_today_key)
             menu.add_command(label="刷新统计", command=lambda: self.refresh_stats(full=True))
             try:
                 menu.tk_popup(event.x_root, event.y_root)
@@ -819,8 +824,8 @@ class FocusFlowApp:
                     key_name = str(values[1])
         if not key_name:
             key_name = simpledialog.askstring(
-                "清除今日按键",
-                "请输入要清除今日次数的按键名：\n例如 A、空格、回车、Esc",
+                "清除今日键鼠",
+                "请输入要清除今日次数的键鼠名：\n例如 A、空格、回车、Esc、鼠标左键、滚轮上滑",
                 parent=self.root)
         if not key_name:
             return
@@ -829,7 +834,7 @@ class FocusFlowApp:
             return
         if not messagebox.askyesno(
                 "确认清除",
-                f"确定清除今日按键 [{key_name}] 的所有次数吗？\n"
+                f"确定清除今日键鼠 [{key_name}] 的所有次数吗？\n"
                 f"此操作仅影响今天的数据，不可撤销。"):
             return
 
@@ -856,7 +861,7 @@ class FocusFlowApp:
         except Exception:
             pass
         messagebox.showinfo("清除完成",
-            f"已清除今日按键 [{key_name}] 的 {deleted:,} 条记录",
+            f"已清除今日键鼠 [{key_name}] 的 {deleted:,} 条记录",
             parent=self.root)
         self.refresh_stats(full=True)
 
@@ -1273,7 +1278,7 @@ class FocusFlowApp:
         """切换显示的视图"""
         # 视图名 -> Frame 映射
         view_map = {
-            "按键排行": self.rank_view,
+            "键鼠排行": self.rank_view,
             "分组统计": self.group_view,
             "趋势图": self.trend_view,
             "小时分布": self.hourly_view,
@@ -1301,7 +1306,7 @@ class FocusFlowApp:
         if not self._current_view:
             return
         try:
-            if self._current_view == "按键排行":
+            if self._current_view == "键鼠排行":
                 self.refresh_stats(full=True)
             elif self._current_view == "分组统计":
                 self.refresh_stats(full=True)
@@ -1521,7 +1526,7 @@ class FocusFlowApp:
                    command=self.on_cleanup).grid(row=0, column=0, padx=(0, 8), pady=3, sticky='w')
         ttk.Button(op_grid, text="压缩数据库", width=14,
                    command=self.on_vacuum).grid(row=0, column=1, pady=3, sticky='w')
-        ttk.Button(op_grid, text="清除今日按键", width=14,
+        ttk.Button(op_grid, text="清除今日键鼠", width=14,
                    command=self.clear_today_key).grid(row=1, column=0, padx=(0, 8), pady=3, sticky='w')
         ttk.Button(op_grid, text="导出数据", width=14,
                    command=self.on_export).grid(row=1, column=1, pady=3, sticky='w')
@@ -1782,7 +1787,7 @@ class FocusFlowApp:
 
     # ---------- 数据刷新 ----------
     def refresh_stats(self, full: bool = False):
-        """刷新统计（纯键盘）
+        """刷新统计（键鼠合并）
 
         优化：只更新当前可见的标签页，不重绘所有表格
         趋势图只在切换到趋势标签页或全量刷新时更新
@@ -1792,11 +1797,11 @@ class FocusFlowApp:
             # 更新年度下拉（轻量操作）
             self._update_year_combo()
 
-            # 今日活跃 = 键盘按键数（v1.0：纯键盘）
+            # 今日活跃 = 键盘+鼠标输入数
             today = database.get_today_count()
             self.today_label.config(text=f"{today:,}")
 
-            # 周期总数 + 按键排行（纯键盘统计）
+            # 周期总数 + 键鼠排行
             if self.current_date:
                 total, key_stats = database.get_stats_by_date(
                     self.current_date)
@@ -1809,8 +1814,8 @@ class FocusFlowApp:
 
             if full:
                 # 只更新当前视图
-                cv = getattr(self, '_current_view', '按键排行')
-                if cv == "按键排行":
+                cv = getattr(self, '_current_view', '键鼠排行')
+                if cv == "键鼠排行":
                     self._refresh_rank_table(key_stats, total)
                 elif cv == "分组统计":
                     self._refresh_group_table(key_stats, total)
@@ -1860,7 +1865,7 @@ class FocusFlowApp:
         try:
             import stats
             cpm = stats.get_current_cpm()
-            self.cpm_label.config(text=f"{cpm} 键/分")
+            self.cpm_label.config(text=f"{cpm} 次/分")
         except Exception as e:
             log.debug('刷新 CPM 失败: %s', e)
 
@@ -2130,7 +2135,7 @@ class FocusFlowApp:
             today = database.get_today_count()
             self.today_label.config(text=f"{today:,}")
             cpm = stats.get_current_cpm()
-            self.cpm_label.config(text=f"{cpm} 键/分")
+            self.cpm_label.config(text=f"{cpm} 次/分")
             if get_listener().is_paused():
                 self.pause_status_label.config(text="[已暂停]",
                                                foreground=self._theme_colors['danger'])

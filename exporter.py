@@ -28,12 +28,12 @@ def export_csv(days: Optional[int], filepath: str, year: Optional[int] = None) -
                 period = '总计'
             else:
                 period = f'最近{days}天'
-            writer.writerow(['# FocusFlow 键盘活跃统计导出'])
+            writer.writerow(['# FocusFlow 键鼠活跃统计导出'])
             writer.writerow(['# 统计周期', period])
             writer.writerow(['# 总活跃次数', total])
             writer.writerow(['# 导出时间', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
             writer.writerow([])
-            writer.writerow(['排名', '按键', '次数', '占比(%)'])
+            writer.writerow(['排名', '键鼠', '次数', '占比(%)'])
             for rank, (key_name, count) in enumerate(key_stats.items(), 1):
                 percent = f"{count / total * 100:.2f}" if total > 0 else '0.00'
                 writer.writerow([rank, key_name, count, percent])
@@ -107,7 +107,7 @@ def export_html(days: Optional[int], filepath: str, year: Optional[int] = None) 
     <div class="total">总活跃次数：{total:,}</div>
     <table>
         <thead>
-            <tr><th>排名</th><th>按键</th><th>次数</th><th>占比</th></tr>
+            <tr><th>排名</th><th>键鼠</th><th>次数</th><th>占比</th></tr>
         </thead>
         <tbody>
             {''.join(rows_html)}

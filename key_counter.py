@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 FocusFlow - 效率追踪器 v1.1
-模块化重构 + 全面优化 + 年度归档 + 纯键盘统计
+模块化重构 + 全面优化 + 年度归档 + 键鼠统计
+
+v1.2 变更：重新启用键鼠统计——键盘按键 + 鼠标点击/滚轮统一记录，
+           排行视图由"按键排行"更名为"键鼠排行"；滚轮连续滚动合并计数，
+           避免"滑一会儿"累加成十几次虚高。
 
 v1.1 变更：新增"小憩与护眼"联动功能——
            检测连续高强度输入自动弹出护眼提醒（休息一下/继续工作）；
@@ -12,15 +16,14 @@ v1.0 变更：全新 DeepSeek 风格界面（液态玻璃卡片 + 渐变背景 +
            Edge 历史趋势图改用 Tk Canvas（不再依赖 matplotlib）；
            按键长按自动重复过滤；新增"清除今日按键"；修复界面卡顿
            （非阻塞 flush + flush 事件残留 bug）；记账本恢复"距今多久"(多选)、
-           月度汇总分类明细按净值统计、分页每 10 条、日期范围筛选生效；
-           移除鼠标统计，仅保留纯键盘统计。
+           月度汇总分类明细按净值统计、分页每 10 条、日期范围筛选生效。
 
 模块结构：
 - config.py        配置管理（config.ini）
 - logger.py        日志（RotatingFileHandler 5MB×3 + 全局异常钩子）
 - database.py      数据库（年度归档/WAL/单写线程/缓存/备份/VACUUM/清理）
 - stats.py         CPM 计算（带锁+缓存）
-- listener.py      键盘监听（暂停/过滤/按键回调）
+- listener.py      键鼠监听（暂停/过滤/按键与鼠标回调/滚轮合并）
 - autostart.py     开机自启（注册表）
 - hotkey.py        全局热键（Ctrl+Shift+F）
 - tray.py          系统托盘（暂停态图标/tooltip）
@@ -232,7 +235,7 @@ def main():
     from listener import start_listener
     start_listener()
 
-    # 注册按键回调：番茄钟计数 + 护眼提醒检测
+    # 注册输入回调：番茄钟计数 + 护眼提醒检测
     try:
         from listener import get_listener
         from pomodoro import get_pomodoro
@@ -241,7 +244,7 @@ def main():
         _listener.add_key_callback(get_pomodoro().record_key)
         _listener.add_key_callback(get_rest_reminder().record_key)
     except Exception as e:
-        log_main.warning('注册按键回调失败: %s', e)
+        log_main.warning('注册输入回调失败: %s', e)
 
     from gui import FocusFlowApp
     hidden = '--hidden' in sys.argv or get_start_to_tray()
@@ -298,7 +301,7 @@ def _show_first_run_tip(app):
         pass
 
     msg = (
-        "欢迎使用 FocusFlow！程序已启动，开始记录键盘活跃数据。\n\n"
+        "欢迎使用 FocusFlow！程序已启动，开始记录键盘与鼠标活跃数据。\n\n"
         "• 关闭窗口 = 最小化到托盘后台运行\n"
         "• 悬停托盘图标 = 查看今日活跃与速度\n"
         "• 双击托盘图标 = 打开统计面板\n"
