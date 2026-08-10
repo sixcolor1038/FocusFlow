@@ -18,6 +18,7 @@ v1.2 变更：重新启用键鼠统计，鼠标操作（点击/滚轮）与键�
 """
 
 import os
+import re
 import time
 import sqlite3
 import threading
@@ -158,8 +159,56 @@ def init_db():
     # 年度归档检查
     _check_yearly_archive()
 
+    # v1.2.1 数据迁移：拆分旧版组合键（Ctrl+D → Ctrl 与 D 各自独立计数）
+    try:
+        _migrate_combo_keys()
+    except Exception as e:
+        log.warning('组合键数据迁移异常: %s', e)
+
     # 显式启动写入线程
     get_writer()
+
+
+# ==================== 数据迁移 ====================
+_CTRL_SINGLE_RE = re.compile(r'^Ctrl\+([A-Za-z0-9])$')
+
+
+def _migrate_combo_keys() -> int:
+    """拆分旧版"Ctrl+X"组合键记录，返回更新的记录数
+
+    v1.2.0 及之前，按住 Ctrl 按字母时会被记录成 'Ctrl+D' 这样的组合键名；
+    v1.2.1 起改为 Ctrl 键与字母键各自独立计数（左Ctrl + D 各 1 次）。
+    本函数把历史库中已存在的 'Ctrl+X' 记录改名为对应物理键 'X'
+    （'Ctrl+127' → 'Delete'），与新统计口径一致，同类计数自动合并。
+
+    幂等：已转换的记录不再匹配该模式，可安全重复执行（每次启动自动运行）。
+    """
+    migrated = 0
+    for year in get_available_years():
+        try:
+            with DBConnection(year=year) as conn:
+                cur = conn.execute(
+                    "SELECT DISTINCT key_name FROM key_log WHERE key_name LIKE 'Ctrl+%'"
+                )
+                names = [r[0] for r in cur.fetchall()]
+                for old_name in names:
+                    new_name = None
+                    m = _CTRL_SINGLE_RE.match(old_name)
+                    if m:
+                        new_name = m.group(1).upper()
+                    elif old_name == 'Ctrl+127':
+                        new_name = 'Delete'
+                    if new_name and new_name != old_name:
+                        conn.execute(
+                            'UPDATE key_log SET key_name=? WHERE key_name=?',
+                            (new_name, old_name)
+                        )
+                        migrated += 1
+        except Exception as e:
+            log.warning('组合键数据迁移失败（%d 年）: %s', year, e)
+    if migrated:
+        log.info('组合键数据迁移完成：%d 条 Ctrl+X 记录已按物理键拆分', migrated)
+    return migrated
 
 
 def _check_yearly_archive():

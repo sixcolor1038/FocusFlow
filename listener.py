@@ -71,20 +71,18 @@ def normalize_key(key) -> str:
     try:
         char = key.char
         if char is not None and len(char) == 1:
-            # 检查是否是控制字符（Ctrl+字母组合时 char 是控制字符）
+            # 检查是否是控制字符（按住 Ctrl 时字母会变成控制字符，如 Ctrl+D → '\x04'）
             if ord(char) < 32 or ord(char) == 127:
-                # 控制字符，不记录为普通字符
-                # 返回 Ctrl+对应字母，避免和普通按键混淆
+                # 控制字符：还原为物理键本身，而不是记成 "Ctrl+X" 组合键。
+                # 这样 Ctrl 键与字母键各自独立计数（按 Ctrl+D = 左Ctrl 1 次 + D 1 次）。
                 ctrl_map = {
-                    '\x01': 'Ctrl+A', '\x02': 'Ctrl+B', '\x03': 'Ctrl+C',
-                    '\x04': 'Ctrl+D', '\x05': 'Ctrl+E', '\x06': 'Ctrl+F',
-                    '\x07': 'Ctrl+G', '\x08': 'Ctrl+H', '\x09': 'Ctrl+I',
-                    '\x0a': 'Ctrl+J', '\x0b': 'Ctrl+K', '\x0c': 'Ctrl+L',
-                    '\x0d': 'Ctrl+M', '\x0e': 'Ctrl+N', '\x0f': 'Ctrl+O',
-                    '\x10': 'Ctrl+P', '\x11': 'Ctrl+Q', '\x12': 'Ctrl+R',
-                    '\x13': 'Ctrl+S', '\x14': 'Ctrl+T', '\x15': 'Ctrl+U',
-                    '\x16': 'Ctrl+V', '\x17': 'Ctrl+W', '\x18': 'Ctrl+X',
-                    '\x19': 'Ctrl+Y', '\x1a': 'Ctrl+Z',
+                    '\x01': 'A', '\x02': 'B', '\x03': 'C', '\x04': 'D',
+                    '\x05': 'E', '\x06': 'F', '\x07': 'G', '\x08': 'H',
+                    '\x09': 'I', '\x0a': 'J', '\x0b': 'K', '\x0c': 'L',
+                    '\x0d': 'M', '\x0e': 'N', '\x0f': 'O', '\x10': 'P',
+                    '\x11': 'Q', '\x12': 'R', '\x13': 'S', '\x14': 'T',
+                    '\x15': 'U', '\x16': 'V', '\x17': 'W', '\x18': 'X',
+                    '\x19': 'Y', '\x1a': 'Z', '\x7f': 'Delete',
                 }
                 return ctrl_map.get(char, f'Ctrl+{ord(char)}')
             # 普通可见字符

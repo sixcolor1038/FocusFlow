@@ -3,7 +3,7 @@
 > 个人效率与专注力分析工具：键盘活跃统计 + 记账本 + 定时任务 + Edge 历史记录
 > 深色/亮色"液态玻璃"界面，纯本地存储，数据不上传任何服务器。
 
-![Version](https://img.shields.io/badge/version-1.2-blue)
+![Version](https://img.shields.io/badge/version-1.2.1-blue)
 ![Python](https://img.shields.io/badge/Python-3.13-green)
 ![Platform](https://img.shields.io/badge/Windows-10%2F11-blueviolet)
 
@@ -25,6 +25,7 @@
 - 历史日期查询、按键分组统计（含"鼠标点击""滚轮"分组）
 - 近 7/30 天活跃趋势图、小时分布、星期分布
 - **长按自动重复过滤**：玩游戏/长按某键时自动重复不计入，避免计数虚高
+- **组合键独立计数**：Ctrl/Shift+字母时各物理键分别计数（Ctrl+D = Ctrl 1 次 + D 1 次），历史数据自动迁移
 - **清除今日键鼠**：异常计数一键清除
 
 ### 小憩与护眼
