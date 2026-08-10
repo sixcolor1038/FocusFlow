@@ -1,7 +1,7 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul 2>&1
 echo ========================================
-echo   FocusFlow - Build Script v1.4 (onefile)
+echo   FocusFlow - Build Script v1.6 (onefile)
 echo ========================================
 echo.
 

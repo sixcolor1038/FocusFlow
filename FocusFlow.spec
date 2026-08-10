@@ -2,9 +2,9 @@
 """FocusFlow PyInstaller spec 文件（精简版 - 无 matplotlib · onefile 单文件模式）
 
 说明：
-- 采用 onefile（单文件）模式：对"下载即用"更稳定（onedir 会因下载锁定标记
-  静默拦截 DLL 导致双击没反应）；单进程内自带引导器，任务管理器或显示两个
-  同名进程属正常现象
+- 采用 onefile（单文件）模式：对"下载即用"最稳定（onedir 会被下载锁定标记
+  稳定拦截导致双击没反应）。代价是运行时任务管理器出现引导器+程序两个同名
+  进程，属正常现象
 - 排除无用大模块，进一步减小体积
 - 用法：pyinstaller FocusFlow.spec
 """
@@ -105,9 +105,9 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # 单文件模式（onefile）：把一切打进单个 exe。
-# 选择 onefile 的原因：onedir 会直接从带"下载锁定标记(MOTW)"的 _internal
-# 文件夹加载 DLL，被 Windows 静默拦截导致"双击没反应"；而 onefile 是把内部
-# 文件解压到临时目录运行，对下载文件更稳定，可"下载即用"。
+# 实测 onedir 会因"下载锁定标记(MOTW)"被 Windows 稳定拦截（双击无反应），
+# 而 onefile 把内部文件解压到临时目录运行、不受影响，可"下载即用"。
+# 代价：运行时任务管理器会出现引导器+程序两个同名进程（属正常现象）。
 exe = EXE(
     pyz,
     a.scripts,

@@ -222,17 +222,9 @@ def check_single_instance() -> bool:
         CreateMutex.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
         CreateMutex.restype = wintypes.HANDLE
         ERROR_ALREADY_EXISTS = 183
-        MB_TOPMOST = 0x00040000
         mutex = CreateMutex(None, True, mutex_name)
         if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
-            # 已有实例在运行：把已有窗口调到前台，并给出清晰的置顶提示
-            _activate_existing_window()
-            ctypes.windll.user32.MessageBoxW(
-                0,
-                "FocusFlow 已经在运行了，已帮你把它的窗口调到前台。\n"
-                "如需完全重启，请先在托盘图标右键选择「退出程序」。",
-                "FocusFlow - 已在运行",
-                MB_TOPMOST)
+            # 已有实例在运行：由 main() 负责把已有窗口调到前台并静默退出，不弹任何对话框
             return False
         global _mutex_handle
         _mutex_handle = mutex
@@ -270,11 +262,8 @@ def main():
 
     # GUI 模式
     if not check_single_instance():
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(
-            0, "FocusFlow 已经在运行了，在系统托盘里哦~",
-            "FocusFlow", 64
-        )
+        # 已有实例在运行：把已有窗口调到前台并静默退出，不弹任何对话框
+        _activate_existing_window()
         sys.exit(0)
 
     import database

@@ -3,7 +3,7 @@
 > 个人效率与专注力分析工具：键盘活跃统计 + 记账本 + 定时任务 + Edge 历史记录
 > 深色/亮色"液态玻璃"界面，纯本地存储，数据不上传任何服务器。
 
-![Version](https://img.shields.io/badge/version-1.2.4-blue)
+![Version](https://img.shields.io/badge/version-1.2.5-blue)
 ![Python](https://img.shields.io/badge/Python-3.13-green)
 ![Platform](https://img.shields.io/badge/Windows-10%2F11-blueviolet)
 
@@ -80,7 +80,7 @@
 | --- | --- |
 | Python 3.13 | 开发语言 |
 | Tkinter / ttk | 界面（无第三方 UI 库） |
-| PyInstaller | 单文件打包（onefile） |
+| PyInstaller | 文件夹打包（onedir） |
 | pynput | 键盘 / 鼠标全局监听 |
 | pystray | 系统托盘 |
 | Pillow | 图形绘制（玻璃卡片 / 渐变背景 / 图标） |
@@ -130,9 +130,8 @@ pyinstaller --noconfirm FocusFlow.spec
 
 ## 部署（免安装）
 
-- `FocusFlow.exe` 为单文件程序（PyInstaller onefile），已内置 Python 与全部依赖
-- 新电脑上无需安装任何环境，解压后双击 `FocusFlow.exe` 即可使用（Windows 10/11 64 位）
-- 若首次运行被 Windows 安全提示拦截，点击「更多信息 → 仍要运行」即可（无需手动解除锁定）
+- `FocusFlow` 为文件夹打包（onedir），内含 exe 与 `_internal` 依赖，已内置 Python 与全部依赖
+- 新电脑上无需安装任何环境，解压后双击 `FocusFlow\FocusFlow.exe` 即可使用（Windows 10/11 64 位）
 - 数据保存在 exe 同目录（`data/`、`logs/` 等），拷贝整个文件夹即可迁移数据
 
 ---
