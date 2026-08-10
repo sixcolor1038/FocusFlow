@@ -262,8 +262,17 @@ def main():
 
     # GUI 模式
     if not check_single_instance():
-        # 已有实例在运行：把已有窗口调到前台并静默退出，不弹任何对话框
+        # 已有实例在运行：把已有窗口调到前台，并弹一次提示后退出
+        # （注意：对话框只在此处弹一次，check_single_instance 不再弹，避免重复）
         _activate_existing_window()
+        import ctypes
+        MB_TOPMOST = 0x00040000
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "FocusFlow 已经在运行了，已帮你把它的窗口调到前台。\n"
+            "如需彻底重启，请先在托盘图标右键选择「退出程序」。",
+            "FocusFlow",
+            MB_TOPMOST)
         sys.exit(0)
 
     import database
