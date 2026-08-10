@@ -1,4 +1,14 @@
-# FocusFlow - 效率追踪器 v1.2.3 使用说明
+# FocusFlow - 效率追踪器 v1.2.4 使用说明
+
+## v1.2.4 更新亮点（恢复单文件 · 下载即用）
+
+### 0. 改回单文件打包（onefile）
+- **原因**：v1.2.2 改用文件夹(onedir)后，从网页下载的压缩包解压出的 exe 和内部 DLL 都带"下载锁定标记(MOTW)"，Windows 会静默拦截，导致"双击没反应"，需手动解除锁定才能用
+- **调整**：改回**单个 exe** 打包——单文件是把内部文件解压到临时目录运行，不受下载锁定标记影响，**下载解压后双击即可使用**，无需任何解除锁定操作
+- 若首次运行 Windows 弹出安全提示，点击「更多信息 → 仍要运行」一次即可（之后不再提示）
+- 说明：单文件运行时，任务管理器可能出现两个同名进程（引导器 + 程序），属正常现象
+
+---
 
 ## v1.2.3 更新亮点（修复重复启动"无反应"）
 
@@ -328,9 +338,9 @@ FocusFlow.exe --reset              # 清空所有记录（需二次确认）
 ## 在新电脑上部署（免安装）
 
 **直接用软件包即可运行，无需安装任何环境：**
-- `FocusFlow` 为文件夹打包（PyInstaller onedir），内含 exe 与 `_internal` 依赖，已内置 Python 运行库、Tkinter、以及 pynput / pystray / Pillow 等全部依赖
+- `FocusFlow.exe` 为单文件（PyInstaller onefile），已内置 Python 运行库、Tkinter、以及 pynput / pystray / Pillow 等全部依赖
 - 新电脑上**不需要安装 Python**，也不需要 pip 安装任何库
-- 使用方法：把 zip 解压到任意文件夹（建议放在普通用户文件夹，如 `D:\FocusFlow`），双击 `FocusFlow.exe` 即可
+- 使用方法：把 zip 解压到任意文件夹（建议放在普通用户文件夹，如 `D:\FocusFlow`），双击 `FocusFlow.exe` 即可，**无需任何解除锁定操作**（下载即用）
 
 **运行要求：**
 - Windows 10 / 11（64 位）

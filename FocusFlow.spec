@@ -1,8 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""FocusFlow PyInstaller spec 文件（精简版 - 无 matplotlib · onedir 文件夹模式）
+"""FocusFlow PyInstaller spec 文件（精简版 - 无 matplotlib · onefile 单文件模式）
 
 说明：
-- 采用 onedir（文件夹）模式：单进程、启动快（无需每次解压）、内存占用更低
+- 采用 onefile（单文件）模式：对"下载即用"更稳定（onedir 会因下载锁定标记
+  静默拦截 DLL 导致双击没反应）；单进程内自带引导器，任务管理器或显示两个
+  同名进程属正常现象
 - 排除无用大模块，进一步减小体积
 - 用法：pyinstaller FocusFlow.spec
 """
@@ -102,12 +104,17 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-# onedir 模式：exe 内只放引导 + PYZ，其余二进制/数据由 COLLECT 放到文件夹
+# 单文件模式（onefile）：把一切打进单个 exe。
+# 选择 onefile 的原因：onedir 会直接从带"下载锁定标记(MOTW)"的 _internal
+# 文件夹加载 DLL，被 Windows 静默拦截导致"双击没反应"；而 onefile 是把内部
+# 文件解压到临时目录运行，对下载文件更稳定，可"下载即用"。
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='FocusFlow',
     debug=False,
     bootloader_ignore_signals=False,
@@ -123,16 +130,5 @@ exe = EXE(
     entitlements_file=None,
     icon='focusflow.ico',
     version='version_info.txt',
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name='FocusFlow',
 )
 
