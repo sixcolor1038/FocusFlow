@@ -3,7 +3,7 @@
 > 个人效率与专注力分析工具：键盘活跃统计 + 记账本 + 定时任务 + Edge 历史记录
 > 深色/亮色"液态玻璃"界面，纯本地存储，数据不上传任何服务器。
 
-![Version](https://img.shields.io/badge/version-1.2.9-blue)
+![Version](https://img.shields.io/badge/version-1.2.10-blue)
 ![Python](https://img.shields.io/badge/Python-3.13-green)
 ![Platform](https://img.shields.io/badge/Windows-10%2F11-blueviolet)
 

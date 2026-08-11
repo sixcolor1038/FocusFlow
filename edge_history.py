@@ -49,23 +49,61 @@ def _datetime_to_chrome_time(dt: datetime) -> int:
     return int(delta.total_seconds() * 1000000)
 
 
-def _copy_history_db() -> Optional[str]:
-    """复制 Edge 历史记录数据库到临时文件（避免锁定）
+def _open_edge_history() -> Tuple[Optional[sqlite3.Connection], Optional[str]]:
+    """打开 Edge 历史库，返回 (连接, 临时文件路径)
 
-    Returns: 临时文件路径，失败返回 None
+    策略：
+    1. 优先只读直连（`file:...?mode=ro`）：Edge 未运行或允许读时，
+       完全不复制大文件（Edge 历史库可达几十上百 MB），最快。
+    2. 失败（Edge 运行中持有文件锁）则复制 主库+WAL+SHM 到临时文件后打开，
+       保证包含 WAL 中未 checkpoint 的数据（旧版只复制主库会漏最近记录）。
+
+    调用方负责：用完关闭连接，若临时文件非 None 则删除。
     """
     history_path = get_edge_history_path()
     if not os.path.exists(history_path):
         log.debug('Edge 历史记录文件不存在: %s', history_path)
-        return None
+        return None, None
 
+    # 1) 只读直连
+    try:
+        conn = sqlite3.connect(f'file:{history_path}?mode=ro', uri=True)
+        return conn, None
+    except Exception as e:
+        log.debug('Edge 历史库只读直连失败（可能被 Edge 锁定），改走复制: %s', e)
+
+    # 2) 复制主库 + WAL + SHM（保证数据完整）
     temp_path = os.path.join(get_data_dir(), '_edge_history_temp.db')
     try:
         shutil.copy2(history_path, temp_path)
-        return temp_path
+        for suffix in ('-wal', '-shm'):
+            src = history_path + suffix
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, temp_path + suffix)
+                except Exception:
+                    pass
+        conn = sqlite3.connect(temp_path)
+        return conn, temp_path
     except Exception as e:
         log.error('复制 Edge 历史记录失败: %s', e)
-        return None
+        return None, None
+
+
+def _close_edge_connection(conn, temp_path):
+    """关闭连接并清理临时文件"""
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if temp_path:
+        for suffix in ('', '-wal', '-shm'):
+            try:
+                if os.path.exists(temp_path + suffix):
+                    os.remove(temp_path + suffix)
+            except Exception:
+                pass
 
 
 def query_edge_total_count() -> int:
@@ -73,24 +111,17 @@ def query_edge_total_count() -> int:
 
     Returns: 总历史记录条数
     """
-    temp_path = _copy_history_db()
-    if temp_path is None:
+    conn, temp_path = _open_edge_history()
+    if conn is None:
         return 0
-
     try:
-        conn = sqlite3.connect(temp_path)
         cur = conn.execute('SELECT COUNT(*) FROM urls')
-        count = cur.fetchone()[0]
-        conn.close()
-        return count
+        return cur.fetchone()[0]
     except Exception as e:
         log.error('查询 Edge 总历史记录失败: %s', e)
         return 0
     finally:
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+        _close_edge_connection(conn, temp_path)
 
 
 def query_edge_history_count(target_date: Optional[date] = None) -> int:
@@ -104,10 +135,9 @@ def query_edge_history_count(target_date: Optional[date] = None) -> int:
     if target_date is None:
         target_date = date.today()
 
-    temp_path = _copy_history_db()
-    if temp_path is None:
+    conn, temp_path = _open_edge_history()
+    if conn is None:
         return 0
-
     try:
         # 按本地时区计算日期范围
         local_tz = datetime.now().astimezone().tzinfo
@@ -116,22 +146,16 @@ def query_edge_history_count(target_date: Optional[date] = None) -> int:
         chrome_start = _datetime_to_chrome_time(day_start)
         chrome_end = _datetime_to_chrome_time(day_end)
 
-        conn = sqlite3.connect(temp_path)
         cur = conn.execute(
             'SELECT COUNT(*) FROM urls WHERE last_visit_time >= ? AND last_visit_time < ?',
             (chrome_start, chrome_end)
         )
-        count = cur.fetchone()[0]
-        conn.close()
-        return count
+        return cur.fetchone()[0]
     except Exception as e:
         log.error('查询 Edge 历史记录失败: %s', e)
         return 0
     finally:
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+        _close_edge_connection(conn, temp_path)
 
 
 def save_edge_history_count(target_date: date, count: int):

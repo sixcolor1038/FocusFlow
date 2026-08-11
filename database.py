@@ -205,13 +205,15 @@ def _migrate_combo_keys() -> int:
     （'Ctrl+127' → 'Delete'），与新统计口径一致，同类计数自动合并。
 
     幂等：已转换的记录不再匹配该模式，可安全重复执行（每次启动自动运行）。
+    性能：用 GLOB（区分大小写、可利用 idx_key_name 前缀索引）替代 LIKE，
+    大数据库启动时避免全表扫描。
     """
     migrated = 0
     for year in get_available_years():
         try:
             with DBConnection(year=year) as conn:
                 cur = conn.execute(
-                    "SELECT DISTINCT key_name FROM key_log WHERE key_name LIKE 'Ctrl+%'"
+                    "SELECT DISTINCT key_name FROM key_log WHERE key_name GLOB 'Ctrl+*'"
                 )
                 names = [r[0] for r in cur.fetchall()]
                 for old_name in names:
@@ -329,6 +331,36 @@ def _archive_year_data(target_year: int, source_year: int):
         log.error('年度归档失败: %s', e, exc_info=True)
 
 
+def _ensure_schema(year: int):
+    """确保指定年度库有 key_log 表结构
+
+    场景：程序跨年持续运行（如 2026-12-31 → 2027-01-01）而未重启时，
+    init_db 只建了 2026 年的表；2027 年首次写入会因 "no such table"
+    失败丢数据。写入线程检测到年度变化后调用本函数建表。
+    """
+    with DBConnection(year=year) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS key_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_name TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            )
+        ''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON key_log(timestamp)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_key_name ON key_log(key_name)')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
+        conn.execute(
+            'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+            ('year', str(year))
+        )
+    _invalidate_years_cache()
+
+
 # ==================== 写入：单写线程 + Queue ====================
 class _DBWriter:
     """单一后台写入线程"""
@@ -348,6 +380,8 @@ class _DBWriter:
         self._today_date: Optional[date] = None
         self._today_count_lock = threading.Lock()
         self._today_count_last_sync = 0.0
+        # 已确保建表的年份（跨年运行自动建表）
+        self._db_year = datetime.now().year
 
     @property
     def name(self):
@@ -449,12 +483,19 @@ class _DBWriter:
         若不显式开启事务，executemany 的每条记录都会自动提交成独立事务，
         实测写入性能慢约 45 倍。这里用显式 BEGIN IMMEDIATE / COMMIT 把整批
         包进单个事务，一次提交，写入吞吐大幅提升、锁占用更少。
+
+        v1.2.10 优化：跨年运行时自动为新年度库建表，避免 "no such table"
+        导致丢数据。
         """
         if not batch:
             return
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                now_year = datetime.now().year
+                if now_year != self._db_year:
+                    _ensure_schema(now_year)
+                    self._db_year = now_year
                 with DBConnection() as conn:
                     # 单事务原子写入：要么全部写入，要么全部回滚
                     conn.execute('BEGIN IMMEDIATE;')
@@ -618,6 +659,46 @@ def flush_now(wait: bool = True):
     """
     if _writer:
         _writer.flush_now(wait=wait)
+
+
+def reset_all_data() -> int:
+    """清空所有键鼠统计记录（全部年度库），返回删除条数
+
+    供 CLI `--reset` 使用。会先停掉写入线程并排空队列，删除数据后
+    再重建写入线程，避免"边删边写"的竞态。
+    """
+    global _writer
+    total = 0
+
+    # 1. 停写并排空
+    if _writer is not None:
+        flush_now(wait=True)
+        _writer.stop()
+        try:
+            if _writer._thread and _writer._thread.is_alive():
+                _writer._thread.join(timeout=2)
+        except Exception:
+            pass
+
+    # 2. 删除所有年度库中的 key_log 数据
+    for year in get_available_years():
+        try:
+            with DBConnection(year=year) as conn:
+                cur = conn.execute('SELECT COUNT(*) FROM key_log')
+                cnt = cur.fetchone()[0]
+                if cnt > 0:
+                    conn.execute('DELETE FROM key_log')
+                    total += cnt
+        except Exception as e:
+            log.error('清空 %d 年库失败: %s', year, e)
+
+    # 3. 重建全新写入线程（旧实例已停止）
+    with _writer_lock:
+        _writer = None
+    get_writer()
+    _invalidate_years_cache()
+    log.info('已清空全部键鼠记录 %d 条', total)
+    return total
 
 
 def delete_key_today(key_name: str) -> int:
