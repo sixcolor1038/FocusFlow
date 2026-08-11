@@ -10,12 +10,21 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use rusqlite::Connection;
 
 use crate::db::connection;
 use crate::db::queries;
 use crate::paths;
+
+/// 本地时区：日期当天 00:00:00 的 Unix 秒（镜像 Python `time.mktime`）。
+fn local_midnight_ts(date: NaiveDate) -> i64 {
+    chrono::Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("time"))
+        .single()
+        .expect("本地时区转换失败")
+        .timestamp()
+}
 
 /// 检查是否需要年度归档（当前年份库中存在上一年数据时）。
 pub fn check_yearly_archive(yearly_archive_enabled: bool) {
@@ -23,12 +32,7 @@ pub fn check_yearly_archive(yearly_archive_enabled: bool) {
         return;
     }
     let current_year = Local::now().year();
-    let year_start_ts = NaiveDate::from_ymd_opt(current_year, 1, 1)
-        .expect("date")
-        .and_hms_opt(0, 0, 0)
-        .expect("time")
-        .and_utc()
-        .timestamp();
+    let year_start_ts = local_midnight_ts(NaiveDate::from_ymd_opt(current_year, 1, 1).expect("date"));
 
     let path = paths::current_year_db_path();
     let conn = match connection::open_ro(&path) {
@@ -54,18 +58,9 @@ pub fn check_yearly_archive(yearly_archive_enabled: bool) {
 
 /// 将 `source_year` 库中属于 `target_year` 的数据迁移到 `target_year` 库。
 pub fn archive_year_data(target_year: i32, source_year: i32) {
-    let year_start = NaiveDate::from_ymd_opt(target_year, 1, 1)
-        .expect("date")
-        .and_hms_opt(0, 0, 0)
-        .expect("time")
-        .and_utc()
-        .timestamp();
-    let year_end = NaiveDate::from_ymd_opt(target_year + 1, 1, 1)
-        .expect("date")
-        .and_hms_opt(0, 0, 0)
-        .expect("time")
-        .and_utc()
-        .timestamp();
+    let year_start = local_midnight_ts(NaiveDate::from_ymd_opt(target_year, 1, 1).expect("date"));
+    let year_end =
+        local_midnight_ts(NaiveDate::from_ymd_opt(target_year + 1, 1, 1).expect("date"));
 
     // 1. 确保 target_year 库有表结构
     let target_path = paths::year_db_path(target_year);

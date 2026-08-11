@@ -1,35 +1,67 @@
 //! FocusFlow Rust 版可执行程序。
 //!
-//! P0 阶段：提供 eframe/egui 空窗口 + 中文渲染，读取既有 `config.ini`
-//! 并显示关键配置，验证迁移脚手架。
+//! P2：系统集成——单实例、托盘、全局热键、优雅退出。
+//! 主窗口仍为 eframe/egui（P3 完善界面）。
 
-mod app;
 mod gui;
+mod hotkey;
+mod single_instance;
+mod tray;
+
+use std::sync::Arc;
 
 use eframe::egui;
 
 use focusflow_core::config::instance as cfg;
 use focusflow_core::logger;
 
+use crate::gui::AppHandle;
+
 fn main() -> anyhow::Result<()> {
     // 初始化日志（幂等）
     logger::init_logging();
 
-    // 触发配置加载（读取既有 config.ini）
+    // 单实例检查
+    if !single_instance::check_single_instance() {
+        // 已有实例：激活已有窗口后退出（P2 简化：仅提示）
+        tracing::info!("已有 FocusFlow 实例在运行，退出本实例");
+        std::process::exit(0);
+    }
+
+    // 触发配置加载
     let config = cfg();
     tracing::info!(
-        "FocusFlow-rs v{} 启动 (theme={}, hotkey_enabled={})",
+        "FocusFlow-rs v{} 启动 (theme={})",
         focusflow_core::paths::APP_VERSION,
         config.get("gui", "theme"),
-        config.get_bool("hotkey", "enabled", false),
     );
 
-    // 窗口图标（读取失败不影响启动）
+    // 调试模式：--listen-only 只启动监听与数据库（无 GUI），验证 rdev 集成
+    if std::env::args().any(|a| a == "--listen-only") {
+        tracing::info!("listen-only 调试模式：仅启动监听（无 GUI）");
+        let db = focusflow_core::db::Database::init(config)?;
+        let listener = focusflow_core::listener::InputListener::new(config);
+        listener.start(db);
+        tracing::info!("监听已启动，按 Ctrl+C 退出");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    // 在 eframe 启动之前初始化数据库与监听（rdev 钩子先于 GUI 消息循环建立，
+    // 避免 GUI 初始化后 rdev 失效）
+    let db = focusflow_core::db::Database::init(config)?;
+    let listener = focusflow_core::listener::InputListener::new(config);
+    listener.start(Arc::clone(&db));
+    tracing::info!("数据库与键鼠监听已初始化（GUI 启动前）");
+
+    let handle = Arc::new(AppHandle::new());
+
+    // 窗口图标
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/focusflow.png"))
         .map(std::sync::Arc::new)
         .ok();
 
-    // 配置 eframe 窗口
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("FocusFlow - 效率追踪器")
         .with_inner_size([960.0, 720.0])
@@ -42,10 +74,21 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
+    // 传入 handle、db、listener 给 GUI
+    let app_handle = Arc::clone(&handle);
+    let app_db = Arc::clone(&db);
+    let app_listener = Arc::clone(&listener);
     eframe::run_native(
         "FocusFlow",
         options,
-        Box::new(|cc| Ok(Box::new(gui::FocusFlowApp::new(cc)))),
+        Box::new(move |cc| {
+            Ok(Box::new(gui::FocusFlowApp::new(
+                cc,
+                app_handle,
+                app_db,
+                app_listener,
+            )))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("GUI 启动失败: {e}"))
 }

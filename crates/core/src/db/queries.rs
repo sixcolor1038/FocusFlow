@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Days, Local};
+use chrono::{Datelike, Days, Local, TimeZone};
 use rusqlite::Connection;
 
 use crate::db::connection;
@@ -65,20 +65,27 @@ pub fn available_years() -> Vec<i32> {
 
 /// 查询今日按键数（Unix 时间戳范围）。
 fn query_today_count() -> i64 {
-    let start = day_start_ts(Local::now().date_naive());
+    let start = local_day_start_ts(Local::now().date_naive());
     let end = start + 86_400;
     query_count_range(paths::current_year(), start, end)
 }
 
-/// 计算指定日期 Unix 秒。
+/// 计算指定日期的本地时区 Unix 秒范围。
+///
+/// 镜像 Python 版 `time.mktime(datetime(y,m,d).timetuple())`：
+/// 按本地时区把当日 00:00:00 转换为 Unix 秒。
 pub fn date_range_ts(date: chrono::NaiveDate) -> (i64, i64) {
-    let start = date.and_hms_opt(0, 0, 0).expect("time").and_utc().timestamp();
+    let start = local_day_start_ts(date);
     (start, start + 86_400)
 }
 
-/// 本地日期转当日起始 Unix 秒。
-fn day_start_ts(date: chrono::NaiveDate) -> i64 {
-    date.and_hms_opt(0, 0, 0).expect("time").and_utc().timestamp()
+/// 本地日期转当日起始 Unix 秒（本地时区）。
+fn local_day_start_ts(date: chrono::NaiveDate) -> i64 {
+    let local_dt = chrono::Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("time"))
+        .single()
+        .expect("本地时区转换失败");
+    local_dt.timestamp()
 }
 
 /// 查询单个年份库时间范围内计数。
@@ -316,7 +323,7 @@ pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
         daily_map.insert(d, 0);
     }
 
-    let end_ts = day_start_ts(now.date_naive()) + 86_400;
+    let end_ts = local_day_start_ts(now.date_naive()) + 86_400;
 
     for y in &years_to_query {
         let path = paths::year_db_path(*y);
@@ -330,7 +337,7 @@ pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
         if !table_exists(&conn) {
             continue;
         }
-        let start_ts = day_start_ts(start);
+        let start_ts = local_day_start_ts(start);
         let mut stmt = conn
             .prepare(
                 "SELECT timestamp, COUNT(*) as cnt FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY date(timestamp, 'unixepoch', 'localtime')",
@@ -409,7 +416,7 @@ pub fn get_weekday_stats(days: i64) -> HashMap<i64, i64> {
 
 /// 今日 Unix 秒起始。
 pub fn today_start_ts() -> i64 {
-    day_start_ts(Local::now().date_naive())
+    local_day_start_ts(Local::now().date_naive())
 }
 
 /// 当前 Unix 秒。

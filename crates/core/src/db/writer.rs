@@ -206,6 +206,7 @@ fn writer_loop(
         if batch.len() >= batch_size
             || (!batch.is_empty() && last_flush.elapsed() >= flush_interval)
         {
+            tracing::debug!("写批触发: batch={} elapsed={:?}", batch.len(), last_flush.elapsed());
             write_batch(&state, &batch);
             batch.clear();
             last_flush = Instant::now();
@@ -258,8 +259,7 @@ fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
                     stmt.execute(rusqlite::params![key, ts])?;
                 }
                 Ok(())
-            };
-            match insert() {
+            };            match insert() {
                 Ok(()) => {
                     conn.execute("COMMIT;", [])?;
                     Ok(())
@@ -272,7 +272,10 @@ fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
         })();
 
         match result {
-            Ok(()) => return,
+            Ok(()) => {
+                tracing::debug!("批量写入成功: {} 条", batch.len());
+                return;
+            }
             Err(e) => {
                 last_err = Some(e);
                 if attempt < max_retries - 1 {

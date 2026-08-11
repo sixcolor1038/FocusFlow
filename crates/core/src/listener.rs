@@ -311,6 +311,7 @@ impl InputListener {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        tracing::debug!("record_event: {key_name} ts={ts}");
         db.record_key(key_name, ts);
         // 通知回调（番茄钟 / 护眼提醒）
         let callbacks = self.key_callbacks.lock().unwrap();
@@ -390,8 +391,9 @@ impl InputListener {
                 let callback = move |event: Event| {
                     this.process_event(&db, &event);
                 };
-                if let Err(e) = listen(callback) {
-                    tracing::error!("键鼠监听启动失败: {e:?}");
+                match listen(callback) {
+                    Ok(()) => tracing::info!("rdev listen 返回（异常结束）"),
+                    Err(e) => tracing::error!("键鼠监听启动失败: {e:?}"),
                 }
             })
             .expect("启动输入监听线程失败");

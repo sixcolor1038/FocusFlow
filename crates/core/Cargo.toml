@@ -19,5 +19,8 @@ thiserror.workspace = true
 # SQLite（bundled 编译，无需系统库）
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 
+# 开机自启（Windows 注册表/启动文件夹）
+winreg = "0.56"
+
 # 键鼠全局监听
 rdev = "0.5"
