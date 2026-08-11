@@ -15,6 +15,7 @@ anyhow.workspace = true
 # GUI: egui / eframe（即时模式，中文需捆绑字体）
 eframe = { version = "0.36", features = ["default_fonts", "persistence", "wayland", "x11"] }
 egui = "0.36"
+egui_extras = "0.36"
 
 # 系统托盘
 tray-icon = "0.24"

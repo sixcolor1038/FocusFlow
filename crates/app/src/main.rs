@@ -7,6 +7,7 @@ mod gui;
 mod hotkey;
 mod single_instance;
 mod tray;
+mod views;
 
 use std::sync::Arc;
 
