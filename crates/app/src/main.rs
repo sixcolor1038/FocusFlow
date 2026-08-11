@@ -65,8 +65,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("FocusFlow - 效率追踪器")
-        .with_inner_size([960.0, 720.0])
-        .with_min_inner_size([640.0, 460.0]);
+        .with_inner_size([1100.0, 760.0])
+        .with_min_inner_size([820.0, 560.0]);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }

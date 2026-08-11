@@ -24,3 +24,6 @@ winreg = "0.56"
 
 # 键鼠全局监听
 rdev = "0.5"
+
+# Lua 脚本（插件系统）
+mlua = { version = "0.10", features = ["lua54", "vendored"] }

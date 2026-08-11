@@ -9,6 +9,7 @@ pub mod db;
 pub mod listener;
 pub mod logger;
 pub mod paths;
+pub mod plugins;
 pub mod stats;
 
 pub use config::FocusFlowConfig;

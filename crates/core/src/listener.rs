@@ -313,6 +313,8 @@ impl InputListener {
             .unwrap_or(0);
         tracing::debug!("record_event: {key_name} ts={ts}");
         db.record_key(key_name, ts);
+        // 记录 CPM（当前速度统计）
+        crate::stats::cpm(self.config).record();
         // 通知回调（番茄钟 / 护眼提醒）
         let callbacks = self.key_callbacks.lock().unwrap();
         for cb in callbacks.iter() {

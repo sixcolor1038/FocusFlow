@@ -1,0 +1,40 @@
+2026-08-11T20:05:13.040056Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\crates\core\logs\focusflow.log
+2026-08-11T20:05:13.045676Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:05:13.048825Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:05:13.049153Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::plugins::manager: 插件热重载已启用
+2026-08-11T20:05:17.052809Z  INFO         plugin-hot-reload ThreadId(05) focusflow_core::plugins::manager: 热重载检测到变更: stats_overview
+2026-08-11T20:05:23.557619Z ERROR tests::hot_reload_request ThreadId(02) panic: 未捕获的 panic: unknown panic @ crates\core\tests\plugins_test.rs:139
+2026-08-11T20:06:12.503802Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\crates\core\logs\focusflow.log
+2026-08-11T20:06:12.507520Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:06:12.510972Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:06:12.511290Z  INFO tests::hot_reload_request ThreadId(02) focusflow_core::plugins::manager: 插件热重载已启用
+2026-08-11T20:06:16.514835Z  INFO         plugin-hot-reload ThreadId(05) focusflow_core::plugins::manager: 热重载检测到变更: stats_overview
+2026-08-11T20:06:23.017589Z ERROR tests::hot_reload_request ThreadId(02) panic: 未捕获的 panic: unknown panic @ crates\core\tests\plugins_test.rs:139
+2026-08-11T20:06:55.831164Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\crates\core\logs\focusflow.log
+2026-08-11T20:06:55.834259Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:06:55.835204Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:06:55.835515Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件热重载已启用
+2026-08-11T20:06:59.838934Z  INFO         plugin-hot-reload ThreadId(06) focusflow_core::plugins::manager: 热重载检测到变更: stats_overview
+2026-08-11T20:07:00.338982Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::host: [plugin] 统计速览插件已清理
+2026-08-11T20:07:00.339085Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件已卸载: 统计速览
+2026-08-11T20:07:00.340498Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:07:00.341397Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:07:01.839475Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件热重载已禁用
+2026-08-11T20:07:01.844625Z  INFO tests::load_unload_plugin ThreadId(07) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:07:01.845642Z  INFO tests::load_unload_plugin ThreadId(07) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:07:01.845677Z  INFO tests::load_unload_plugin ThreadId(07) focusflow_core::plugins::host: [plugin] 统计速览插件已清理
+2026-08-11T20:07:01.845736Z  INFO tests::load_unload_plugin ThreadId(07) focusflow_core::plugins::manager: 插件已卸载: 统计速览
+2026-08-11T20:09:14.515072Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\crates\core\logs\focusflow.log
+2026-08-11T20:09:14.515317Z  INFO tests::load_unload_plugin ThreadId(04) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:09:14.516140Z  INFO tests::load_unload_plugin ThreadId(04) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:09:14.516163Z  INFO tests::load_unload_plugin ThreadId(04) focusflow_core::plugins::host: [plugin] 统计速览插件已清理
+2026-08-11T20:09:14.516203Z  INFO tests::load_unload_plugin ThreadId(04) focusflow_core::plugins::manager: 插件已卸载: 统计速览
+2026-08-11T20:09:14.520603Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:09:14.521390Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:09:14.521590Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件热重载已启用
+2026-08-11T20:09:18.525070Z  INFO         plugin-hot-reload ThreadId(07) focusflow_core::plugins::manager: 热重载检测到变更: stats_overview
+2026-08-11T20:09:19.025062Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::host: [plugin] 统计速览插件已清理
+2026-08-11T20:09:19.025178Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件已卸载: 统计速览
+2026-08-11T20:09:19.027175Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::host: [plugin] 统计速览插件已初始化
+2026-08-11T20:09:19.028205Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件加载成功: 1
+2026-08-11T20:09:20.526534Z  INFO tests::hot_reload_request ThreadId(03) focusflow_core::plugins::manager: 插件热重载已禁用

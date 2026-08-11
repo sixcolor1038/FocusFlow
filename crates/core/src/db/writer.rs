@@ -55,10 +55,27 @@ impl DbWriter {
     pub fn start(batch_size: usize, flush_interval: Duration) -> Arc<Self> {
         let (tx, rx) = mpsc::sync_channel(MAX_QUEUE);
         let (sig_tx, sig_rx) = mpsc::channel();
+        // 今日计数初始值 = DB 中已有的今日记录数（避免重启后今日活跃先降后升）
+        let today_base = crate::db::queries::today_start_ts();
+        let today_base_count = {
+            let path = paths::current_year_db_path();
+            connection::open_ro(&path)
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2",
+                        rusqlite::params![today_base, today_base + 86_400],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .unwrap_or(0)
+                .max(0) as u64
+        };
         let state = Arc::new(WriterState {
             tx,
             sig_tx,
-            today_count: AtomicU64::new(0),
+            today_count: AtomicU64::new(today_base_count),
             db_year: Mutex::new(paths::current_year()),
             alive: AtomicBool::new(true),
         });

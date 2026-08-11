@@ -3,11 +3,9 @@
 //! 镜像 Python 版 `gui.py` 的各个视图，使用 egui 绘制。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use eframe::egui;
-
-use focusflow_core::db;
-use focusflow_core::stats::cpm as cpm_calc;
 
 /// 主题配色（对应 Python 版 THEMES，硬编码 light/dark 两套）。
 pub struct Theme {
@@ -140,10 +138,6 @@ pub fn classify_key(key_name: &str) -> &'static str {
     "其他"
 }
 
-const KEY_GROUP_ORDER: [&str; 8] = [
-    "字母键", "数字键", "功能键", "修饰键", "编辑键", "鼠标点击", "滚轮", "其他",
-];
-
 /// 周期选择。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Period {
@@ -186,73 +180,72 @@ impl Default for StatsPanel {
 }
 
 impl StatsPanel {
-    pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme, config: &'static focusflow_core::config::FocusFlowConfig) {
-        // 周期选择栏
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        _config: &'static focusflow_core::config::FocusFlowConfig,
+        _db: &Arc<focusflow_core::db::Database>,
+        period_shared: &Arc<std::sync::atomic::AtomicI64>,
+    ) {
+        // 周期选择栏（居中）
         ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("统计周期").color(theme.muted).size(13.0));
+            ui.add_space(8.0);
             for (label, period) in [
-                ("今日", Period::Today),
-                ("7天", Period::Days(7)),
-                ("15天", Period::Days(15)),
-                ("30天", Period::Days(30)),
-                ("1年", Period::Days(365)),
-                ("总计", Period::Total),
+                ("今日", -1i64),
+                ("7天", 7i64),
+                ("15天", 15i64),
+                ("30天", 30i64),
+                ("1年", 365i64),
+                ("总计", 0i64),
             ] {
-                if ui.selectable_label(self.period == period, label).clicked() {
-                    self.period = period;
-                    self.refresh(config);
+                let selected = match self.period {
+                    Period::Today => period == -1,
+                    Period::Total => period == 0,
+                    Period::Days(d) => period == d,
+                };
+                if ui.selectable_label(selected, label).clicked() {
+                    // 更新共享周期，后台线程自动重新查询
+                    period_shared.store(period, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(10.0);
 
-        // 大数字卡片
-        egui::Grid::new("hero_grid")
-            .num_columns(5)
-            .spacing([32.0, 8.0])
-            .show(ui, |ui| {
-                big_stat(ui, theme, "今日活跃", &fmt_thousands(self.today_count));
-                big_stat(ui, theme, "当前速度", &format!("{} 次/分", fmt_thousands(self.cpm)));
-                big_stat(ui, theme, &format!("周期总数({})", self.period.label()), &fmt_thousands(self.total));
-                big_stat(ui, theme, "日均(7天)", &fmt_thousands(self.avg));
-                big_stat(ui, theme, "最高单日", &fmt_thousands(self.max_day));
-            });
-    }
-
-    /// 刷新数据（从 DB 查询 + CPM）。
-    pub fn refresh(&mut self, config: &'static focusflow_core::config::FocusFlowConfig) {
-        self.today_count = db::get_today_count(None);
-        self.cpm = cpm_calc(config).get_cpm();
-        let (total, _) = match self.period {
-            Period::Today => db::get_stats_by_date(chrono::Local::now().date_naive()),
-            Period::Days(d) => db::get_stats(Some(d), None),
-            Period::Total => db::get_stats(None, None),
-        };
-        self.total = total;
-        // 日均与最高单日（近7天）
-        let daily = db::get_daily_counts(7, None);
-        let counts: Vec<i64> = daily.iter().map(|(_, c)| *c).collect();
-        self.avg = if counts.is_empty() {
-            0
-        } else {
-            counts.iter().sum::<i64>() / counts.len() as i64
-        };
-        self.max_day = counts.iter().copied().max().unwrap_or(0);
-    }
-}
-
-fn big_stat(ui: &mut egui::Ui, theme: &Theme, label: &str, value: &str) {
-    egui::Frame::new()
-        .fill(theme.card_bg)
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(16, 10))
-        .show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new(label).color(theme.muted).size(11.0));
-                ui.label(egui::RichText::new(value).color(theme.accent).size(24.0).strong());
-            });
+        // 大数字卡片：用 columns 均分宽度，防止横向溢出
+        let items: [(String, String); 5] = [
+            ("今日活跃".to_string(), fmt_thousands(self.today_count)),
+            ("当前速度".to_string(), format!("{} 次/分", fmt_thousands(self.cpm))),
+            (format!("周期总数({})", self.period.label()), fmt_thousands(self.total)),
+            ("日均(7天)".to_string(), fmt_thousands(self.avg)),
+            ("最高单日".to_string(), fmt_thousands(self.max_day)),
+        ];
+        // columns 自动均分可用宽度，不会横向溢出
+        ui.columns(5, |cols| {
+            for (i, (label, value)) in items.iter().enumerate() {
+                let col_ui = &mut cols[i];
+                col_ui.set_max_width(col_ui.available_width());
+                egui::Frame::new()
+                    .fill(theme.card_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.border))
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(8, 12))
+                    .show(col_ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new(label).color(theme.muted).size(13.0));
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(value)
+                                    .color(theme.accent)
+                                    .size(24.0)
+                                    .strong(),
+                            );
+                        });
+                    });
+            }
         });
+    }
 }
 
 /// 键鼠排行表。
@@ -266,42 +259,47 @@ pub struct RankView {
     pub clear_key: Option<String>,
 }
 
-
 impl RankView {
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        // 使用 Table
         use egui_extras::{Column, TableBuilder};
+        // 排行表：固定列宽（总和 < 最小窗口宽度，占比必可见），内容居中
         TableBuilder::new(ui)
             .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(60.0))
-            .column(Column::remainder())
-            .column(Column::exact(90.0))
-            .column(Column::exact(90.0))
-            .header(20.0, |mut header| {
-                header.col(|ui| { ui.strong("排名"); });
-                header.col(|ui| { ui.strong("键鼠"); });
-                header.col(|ui| { ui.strong("次数"); });
-                header.col(|ui| { ui.strong("占比"); });
+            .resizable(false)
+            .cell_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight))
+            .column(Column::exact(70.0))
+            .column(Column::exact(220.0))
+            .column(Column::exact(110.0))
+            .column(Column::exact(110.0))
+            .header(26.0, |mut header| {
+                header.col(|ui| { ui.strong(egui::RichText::new("排名").size(14.0)); });
+                header.col(|ui| { ui.strong(egui::RichText::new("键鼠").size(14.0)); });
+                header.col(|ui| { ui.strong(egui::RichText::new("次数").size(14.0)); });
+                header.col(|ui| { ui.strong(egui::RichText::new("占比").size(14.0)); });
             })
             .body(|mut body| {
-                for (i, (key, count)) in self.rows.iter().enumerate() {
-                    body.row(22.0, |mut row| {
-                        row.col(|ui| { ui.label((i + 1).to_string()); });
+                for (rank, (key, count)) in self.rows.iter().enumerate() {
+                    let rank = rank + 1;
+                    body.row(30.0, |mut row| {
                         row.col(|ui| {
-                            ui.label(key.as_str());
+                            ui.label(egui::RichText::new(rank.to_string()).size(14.0).color(theme.muted));
                         });
-                        row.col(|ui| { ui.label(fmt_thousands(*count)); });
-                        let percent = if self.total > 0 {
-                            format!("{:.2}%", (*count as f64 / self.total as f64) * 100.0)
-                        } else {
-                            "0.00%".to_string()
-                        };
-                        row.col(|ui| { ui.label(percent); });
+                        row.col(|ui| {
+                            ui.label(egui::RichText::new(key.as_str()).size(15.0).strong());
+                        });
+                        row.col(|ui| {
+                            ui.label(egui::RichText::new(fmt_thousands(*count)).size(15.0).monospace());
+                        });
+                        row.col(|ui| {
+                            let percent = if self.total > 0 {
+                                format!("{:.2}%", (*count as f64 / self.total as f64) * 100.0)
+                            } else {
+                                "0.00%".to_string()
+                            };
+                            ui.label(egui::RichText::new(percent).size(14.0).color(theme.muted));
+                        });
                     });
                 }
-                let _ = theme;
             });
     }
 }
@@ -315,43 +313,38 @@ pub struct GroupView {
 
 
 impl GroupView {
-    pub fn update(&mut self, stats: &HashMap<String, i64>, total: i64) {
-        self.total = total;
-        let mut groups: HashMap<&'static str, i64> = HashMap::new();
-        for (key, count) in stats {
-            let g = classify_key(key);
-            *groups.entry(g).or_insert(0) += count;
-        }
-        self.rows = KEY_GROUP_ORDER
-            .iter()
-            .filter_map(|g| groups.get(*g).map(|c| (*g, *c)))
-            .collect();
-    }
-
-    pub fn show(&self, ui: &mut egui::Ui) {
+    pub fn show(&self, ui: &mut egui::Ui, theme: &Theme) {
         use egui_extras::{Column, TableBuilder};
+        // 分组表：固定列宽，内容居中
         TableBuilder::new(ui)
             .striped(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder())
-            .column(Column::exact(90.0))
-            .column(Column::exact(90.0))
-            .header(20.0, |mut header| {
-                header.col(|ui| { ui.strong("分组"); });
-                header.col(|ui| { ui.strong("次数"); });
-                header.col(|ui| { ui.strong("占比"); });
+            .resizable(false)
+            .cell_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight))
+            .column(Column::exact(220.0))
+            .column(Column::exact(130.0))
+            .column(Column::exact(130.0))
+            .header(26.0, |mut header| {
+                header.col(|ui| { ui.strong(egui::RichText::new("分组").size(14.0)); });
+                header.col(|ui| { ui.strong(egui::RichText::new("次数").size(14.0)); });
+                header.col(|ui| { ui.strong(egui::RichText::new("占比").size(14.0)); });
             })
             .body(|mut body| {
                 for (g, count) in &self.rows {
-                    body.row(22.0, |mut row| {
-                        row.col(|ui| { ui.label(*g); });
-                        row.col(|ui| { ui.label(fmt_thousands(*count)); });
-                        let percent = if self.total > 0 {
-                            format!("{:.2}%", (*count as f64 / self.total as f64) * 100.0)
-                        } else {
-                            "0.00%".to_string()
-                        };
-                        row.col(|ui| { ui.label(percent); });
+                    body.row(30.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(egui::RichText::new(*g).size(15.0).strong());
+                        });
+                        row.col(|ui| {
+                            ui.label(egui::RichText::new(fmt_thousands(*count)).size(15.0).monospace());
+                        });
+                        row.col(|ui| {
+                            let percent = if self.total > 0 {
+                                format!("{:.2}%", (*count as f64 / self.total as f64) * 100.0)
+                            } else {
+                                "0.00%".to_string()
+                            };
+                            ui.label(egui::RichText::new(percent).size(14.0).color(theme.muted));
+                        });
                     });
                 }
             });
@@ -372,20 +365,12 @@ impl Default for TrendView {
 }
 
 impl TrendView {
-    pub fn refresh(&mut self) {
-        self.data = db::get_daily_counts(self.days, None);
-    }
-
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         ui.horizontal(|ui| {
             for (label, days) in [("近7天", 7i64), ("近30天", 30i64)] {
                 if ui.selectable_label(self.days == days, label).clicked() {
                     self.days = days;
-                    self.refresh();
                 }
-            }
-            if ui.button("刷新趋势").clicked() {
-                self.refresh();
             }
         });
         ui.add_space(8.0);
@@ -405,14 +390,7 @@ impl Default for HourlyView {
 }
 
 impl HourlyView {
-    pub fn refresh(&mut self) {
-        self.data = db::queries::get_hourly_stats(None);
-    }
-
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        if ui.button("刷新").clicked() {
-            self.refresh();
-        }
         ui.add_space(8.0);
         draw_bar_chart(ui, theme, "今日每小时活跃", &self.data, 24);
     }
@@ -426,19 +404,10 @@ pub struct WeekdayView {
 
 
 impl WeekdayView {
-    pub fn refresh(&mut self) {
-        self.data = db::queries::get_weekday_stats(30);
-    }
-
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        if ui.button("刷新").clicked() {
-            self.refresh();
-        }
         ui.add_space(8.0);
-        let labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
         let values: Vec<i64> = (0..7).map(|i| self.data.get(&i).copied().unwrap_or(0)).collect();
         draw_bar_chart(ui, theme, "近30天星期活跃", &values, 7);
-        let _ = labels;
     }
 }
 

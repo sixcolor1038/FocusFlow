@@ -3,9 +3,9 @@
 //! P3：完整统计界面——顶部导航 + 主卡片 + 视图切换（排行/分组/趋势/小时/星期）。
 //! 集成托盘、全局热键、单实例、优雅退出。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use eframe::egui;
 
@@ -14,6 +14,89 @@ use crate::tray::Tray;
 use crate::views::{self, GroupView, HourlyView, RankView, StatsPanel, Theme, TrendView, WeekdayView};
 use focusflow_core::config::FocusFlowConfig;
 use focusflow_core::db;
+
+/// 后台线程产出的统计数据（UI 线程只读，避免 UI 线程做 DB 聚合查询）。
+#[derive(Default, Clone)]
+pub struct SharedStats {
+    pub today_count: i64,
+    pub cpm: i64,
+    pub period: i64, // 周期：-1=今日, 0=总计, N=天数
+    pub total: i64,
+    pub avg: i64,
+    pub max_day: i64,
+    pub rank: Vec<(String, i64)>,
+    pub group: Vec<(&'static str, i64)>,
+    pub trend: Vec<(String, i64)>,
+    pub hourly: Vec<i64>,
+    pub weekday: Vec<(i64, i64)>,
+}
+
+/// 后台统计线程：每 2 秒查询一次 DB，写入共享数据。
+pub fn spawn_stats_worker(
+    db: Arc<focusflow_core::db::Database>,
+    config: &'static FocusFlowConfig,
+    shared: Arc<Mutex<SharedStats>>,
+    period: Arc<AtomicI64>,
+) {
+    std::thread::Builder::new()
+        .name("stats-worker".into())
+        .spawn(move || {
+            loop {
+                let period_val = period.load(Ordering::Relaxed);
+
+                // 先做完全部 DB 查询（不持共享锁），最后一次性写入。
+                // 避免 UI 线程 read_shared 被长查询阻塞导致卡顿。
+                let today_count = db::get_today_count(db.writer().map(|w| w.as_ref()));
+                let cpm = focusflow_core::stats::cpm(config).get_cpm();
+                let (total, key_stats) = match period_val {
+                    -1 => db::get_stats_by_date(chrono::Local::now().date_naive()),
+                    0 => db::get_stats(None, None),
+                    n => db::get_stats(Some(n), None),
+                };
+                let mut rank: Vec<(String, i64)> = key_stats.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                rank.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+                let mut groups: HashMap<&'static str, i64> = HashMap::new();
+                for (k, v) in &key_stats {
+                    let g = views::classify_key(k);
+                    *groups.entry(g).or_insert(0) += v;
+                }
+                let group: Vec<(&'static str, i64)> = ["字母键", "数字键", "功能键", "修饰键", "编辑键", "鼠标点击", "滚轮", "其他"]
+                    .iter()
+                    .filter_map(|g| groups.get(*g).map(|c| (*g, *c)))
+                    .collect();
+                let daily = db::get_daily_counts(7, None);
+                let counts: Vec<i64> = daily.iter().map(|(_, c)| *c).collect();
+                let avg = if counts.is_empty() { 0 } else { counts.iter().sum::<i64>() / counts.len() as i64 };
+                let max_day = counts.iter().copied().max().unwrap_or(0);
+                let trend = db::get_daily_counts(7, None);
+                let hourly = db::queries::get_hourly_stats(None);
+                let wd = db::queries::get_weekday_stats(30);
+                let mut weekday: Vec<(i64, i64)> = wd.into_iter().collect();
+                weekday.sort_by_key(|(d, _)| *d);
+
+                // 一次性加锁写入（锁持有时间极短，仅拷贝数据）
+                {
+                    let mut s = shared.lock().unwrap();
+                    s.today_count = today_count;
+                    s.cpm = cpm;
+                    s.period = period_val;
+                    s.total = total;
+                    s.avg = avg;
+                    s.max_day = max_day;
+                    s.rank = rank;
+                    s.group = group;
+                    s.trend = trend;
+                    s.hourly = hourly;
+                    s.weekday = weekday;
+                }
+
+                std::thread::sleep(Duration::from_millis(2000));
+            }
+        })
+        .expect("启动统计线程失败");
+}
+
+use std::collections::HashMap;
 
 /// Windows 系统常见中文字体候选（按优先级）。
 const CJK_FONT_CANDIDATES: &[&str] = &[
@@ -158,14 +241,10 @@ pub struct FocusFlowApp {
     theme: Theme,
     dark: bool,
     current_view: View,
-    stats: StatsPanel,
-    rank: RankView,
-    group: GroupView,
-    trend: TrendView,
-    hourly: HourlyView,
-    weekday: WeekdayView,
-    last_refresh: Instant,
-    last_incremental: Instant,
+    /// 后台线程共享统计数据
+    shared: Arc<Mutex<SharedStats>>,
+    /// 当前周期（后台线程读取）
+    period: Arc<AtomicI64>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -186,6 +265,8 @@ impl FocusFlowApp {
         listener: Arc<focusflow_core::listener::InputListener>,
     ) -> Self {
         let dark = focusflow_core::config::instance().get("gui", "theme") == "dark";
+        let shared = Arc::new(Mutex::new(SharedStats::default()));
+        let period = Arc::new(AtomicI64::new(-1)); // 默认今日
         let mut app = Self {
             config: focusflow_core::config::instance(),
             handle: Arc::clone(&handle),
@@ -197,15 +278,11 @@ impl FocusFlowApp {
             theme: if dark { Theme::dark() } else { Theme::light() },
             dark,
             current_view: View::Rank,
-            stats: StatsPanel::default(),
-            rank: RankView::default(),
-            group: GroupView::default(),
-            trend: TrendView::default(),
-            hourly: HourlyView::default(),
-            weekday: WeekdayView::default(),
-            last_refresh: Instant::now(),
-            last_incremental: Instant::now(),
+            shared: Arc::clone(&shared),
+            period: Arc::clone(&period),
         };
+        // 启动后台统计线程
+        spawn_stats_worker(Arc::clone(&app.db), app.config, shared, period);
         app.setup_fonts(cc);
         handle.set_ctx(cc.egui_ctx.clone());
         app.init_system();
@@ -265,63 +342,34 @@ impl FocusFlowApp {
         ctx.request_repaint();
     }
 
-    /// 增量刷新：今日计数 + CPM（轻量）。
-    fn incremental_refresh(&mut self) {
-        let now = Instant::now();
-        if now.duration_since(self.last_incremental) < Duration::from_millis(1000) {
-            return;
-        }
-        self.last_incremental = now;
-        self.stats.today_count = db::get_today_count(self.db.writer().map(|w| w.as_ref()));
-        self.stats.cpm = focusflow_core::stats::cpm(self.config).get_cpm();
+    /// 从共享数据读取统计（后台线程已计算，UI 线程零 DB 查询）。
+    fn read_shared(&self) -> SharedStats {
+        self.shared.lock().unwrap().clone()
     }
 
-    /// 全量刷新：统计查询 + 当前视图数据。
-    fn full_refresh(&mut self) {
-        let now = Instant::now();
-        if now.duration_since(self.last_refresh) < Duration::from_millis(2000) {
-            return;
-        }
-        self.last_refresh = now;
-        self.stats.refresh(self.config);
-
-        let (total, key_stats) = match self.stats.period {
-            views::Period::Today => db::get_stats_by_date(chrono::Local::now().date_naive()),
-            views::Period::Days(d) => db::get_stats(Some(d), None),
-            views::Period::Total => db::get_stats(None, None),
-        };
-        self.rank.total = total;
-        self.rank.rows = key_stats
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        self.rank.rows.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
-        self.group.update(&key_stats, total);
-    }
-
-    fn show_nav(&self, ui: &mut egui::Ui) {
+    fn show_nav(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("FocusFlow")
                     .color(self.theme.accent)
-                    .size(16.0)
+                    .size(18.0)
                     .strong(),
             );
             ui.label(
                 egui::RichText::new("效率追踪器")
                     .color(self.theme.muted)
-                    .size(11.0),
+                    .size(13.0),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("设置").clicked() {
-                    // 切到设置视图
+                if ui.button(egui::RichText::new("设置").size(14.0)).clicked() {
+                    self.current_view = View::Settings;
                 }
             });
         });
     }
 
     fn show_view_nav(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             for (view, label) in [
                 (View::Rank, "键鼠排行"),
                 (View::Group, "分组统计"),
@@ -330,57 +378,67 @@ impl FocusFlowApp {
                 (View::Weekday, "星期分布"),
                 (View::Settings, "设置"),
             ] {
-                if ui.selectable_label(self.current_view == view, label).clicked() {
+                let selected = self.current_view == view;
+                let btn = egui::Button::new(
+                    egui::RichText::new(label)
+                        .size(14.0)
+                        .strong()
+                        .color(if selected { egui::Color32::WHITE } else { self.theme.fg }),
+                )
+                .fill(if selected { self.theme.accent } else { egui::Color32::TRANSPARENT })
+                .corner_radius(6.0)
+                .min_size(egui::vec2(72.0, 30.0));
+                if ui.add(btn).clicked() {
                     self.current_view = view;
-                    match view {
-                        View::Trend => self.trend.refresh(),
-                        View::Hourly => self.hourly.refresh(),
-                        View::Weekday => self.weekday.refresh(),
-                        View::Settings => {}
-                        _ => self.full_refresh(),
-                    }
                 }
             }
         });
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("设置");
-        ui.add_space(8.0);
+        ui.heading(egui::RichText::new("设置").size(20.0).strong());
+        ui.add_space(12.0);
         ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(12.0);
 
+        // 常规
+        ui.label(egui::RichText::new("常规").size(15.0).strong().color(self.theme.accent));
+        ui.add_space(6.0);
         // 暗色模式
         let mut dark = self.dark;
         if ui.checkbox(&mut dark, "暗色模式").changed() && dark != self.dark {
             self.toggle_theme(ctx);
         }
-
         // 暂停记录
         let mut paused = self.listener.is_paused();
         if ui.checkbox(&mut paused, "暂停记录").changed() {
             self.listener.set_paused(paused);
         }
 
-        // 全局热键开关
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // 全局热键
+        ui.label(egui::RichText::new("全局热键").size(15.0).strong().color(self.theme.accent));
+        ui.add_space(6.0);
         let mut hotkey_enabled = self.config.get_bool("hotkey", "enabled", false);
         if ui.checkbox(&mut hotkey_enabled, "启用全局热键（显示/隐藏主窗口）").changed() {
             self.config.set("hotkey", "enabled", if hotkey_enabled { "true" } else { "false" }).ok();
         }
-        // 热键组合（可编辑）
         ui.horizontal(|ui| {
-            ui.label("热键组合:");
+            ui.label(egui::RichText::new("热键组合:").size(14.0));
             let mut hotkey_str = self.config.get_or("hotkey", "toggle_window", "ctrl+shift+f");
             if ui.text_edit_singleline(&mut hotkey_str).changed() {
                 self.config.set("hotkey", "toggle_window", &hotkey_str).ok();
             }
         });
 
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         ui.separator();
-        ui.add_space(8.0);
-        ui.heading("数据操作");
-        ui.add_space(4.0);
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("数据操作").size(15.0).strong().color(self.theme.accent));
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui.button("导出数据").clicked() {
                 // 占位
@@ -391,61 +449,109 @@ impl FocusFlowApp {
             }
         });
 
-        ui.add_space(12.0);
+        ui.add_space(16.0);
         ui.label(egui::RichText::new(format!(
             "FocusFlow v{} · Rust 迁移版",
             focusflow_core::paths::APP_VERSION
         ))
         .color(self.theme.muted)
-        .size(11.0));
+        .size(12.0));
     }
 
     fn show_content(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        // 顶部导航
-        egui::Frame::new()
-            .fill(self.theme.card_bg)
-            .corner_radius(10.0)
-            .inner_margin(egui::Margin::symmetric(16, 10))
-            .show(ui, |ui| {
-                self.show_nav(ui);
-            });
-        ui.add_space(8.0);
+        // 从后台线程快照统计数据（UI 线程不做 DB 查询）
+        let s = self.read_shared();
 
-        // 主卡片：核心数据
-        egui::Frame::new()
-            .fill(self.theme.card_bg)
-            .corner_radius(10.0)
-            .inner_margin(egui::Margin::symmetric(16, 12))
+        // 整体垂直滚动：任何窗口大小下都能查看全部内容
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.stats.show(ui, &self.theme, self.config);
-            });
-        ui.add_space(8.0);
+                ui.set_min_width(ui.available_width());
 
-        // 视图切换
-        egui::Frame::new()
-            .fill(self.theme.card_bg)
-            .corner_radius(10.0)
-            .inner_margin(egui::Margin::symmetric(16, 8))
-            .show(ui, |ui| {
-                self.show_view_nav(ui);
-            });
-        ui.add_space(8.0);
-
-        // 内容区
-        egui::Frame::new()
-            .fill(self.theme.card_bg)
-            .corner_radius(10.0)
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
+                // 顶部导航
+                egui::Frame::new()
+                    .fill(self.theme.card_bg)
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(16, 10))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        self.show_nav(ui);
+                    });
+                ui.add_space(8.0);
+
+                // 主卡片：核心数据
+                let mut stats = StatsPanel {
+                    today_count: s.today_count,
+                    cpm: s.cpm,
+                    period: match s.period {
+                        -1 => views::Period::Today,
+                        0 => views::Period::Total,
+                        n => views::Period::Days(n),
+                    },
+                    total: s.total,
+                    avg: s.avg,
+                    max_day: s.max_day,
+                };
+                egui::Frame::new()
+                    .fill(self.theme.card_bg)
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        stats.show(ui, &self.theme, self.config, &self.db, &self.period);
+                    });
+                ui.add_space(8.0);
+
+                // 视图切换
+                egui::Frame::new()
+                    .fill(self.theme.card_bg)
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(16, 8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        self.show_view_nav(ui);
+                    });
+                ui.add_space(8.0);
+
+                // 内容区
+                egui::Frame::new()
+                    .fill(self.theme.card_bg)
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         match self.current_view {
-                            View::Rank => self.rank.show(ui, &self.theme),
-                            View::Group => self.group.show(ui),
-                            View::Trend => self.trend.show(ui, &self.theme),
-                            View::Hourly => self.hourly.show(ui, &self.theme),
-                            View::Weekday => self.weekday.show(ui, &self.theme),
+                            View::Rank => {
+                                let mut rank = RankView {
+                                    rows: s.rank.clone(),
+                                    total: s.total,
+                                    clear_key: None,
+                                };
+                                rank.show(ui, &self.theme);
+                            }
+                            View::Group => {
+                                let group = GroupView {
+                                    rows: s.group.clone(),
+                                    total: s.total,
+                                };
+                                group.show(ui, &self.theme);
+                            }
+                            View::Trend => {
+                                let mut trend = TrendView {
+                                    days: 7,
+                                    data: s.trend.clone(),
+                                };
+                                trend.show(ui, &self.theme);
+                            }
+                            View::Hourly => {
+                                let mut hourly = HourlyView { data: s.hourly.clone() };
+                                hourly.show(ui, &self.theme);
+                            }
+                            View::Weekday => {
+                                let weekday_map: HashMap<i64, i64> = s.weekday.iter().copied().collect();
+                                let mut weekday = WeekdayView { data: weekday_map };
+                                weekday.show(ui, &self.theme);
+                            }
                             View::Settings => self.show_settings(ui, ctx),
                         }
                     });
@@ -463,10 +569,6 @@ impl eframe::App for FocusFlowApp {
 
         // 应用主题
         self.theme.apply(&ctx);
-
-        // 定时刷新
-        self.incremental_refresh();
-        self.full_refresh();
 
         egui::CentralPanel::default()
             .frame(

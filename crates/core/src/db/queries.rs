@@ -199,7 +199,11 @@ fn stats_single_year(year: i32, days: Option<i64>) -> (i64, HashMap<String, i64>
 
 /// 跨年查询：第一个年份库为主库，ATTACH 其他。
 fn stats_multi_year(years: &[i32], days: Option<i64>) -> (i64, HashMap<String, i64>) {
-    let main_year = years[0];
+    // 稳健性：无年份时返回空
+    let Some(main_year) = years.first() else {
+        return (0, HashMap::new());
+    };
+    let main_year = *main_year;
     let path = paths::year_db_path(main_year);
     let conn = match connection::open_ro(&path) {
         Ok(c) => c,

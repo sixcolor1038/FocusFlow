@@ -1,0 +1,388 @@
+//! 插件管理器：扫描、加载、卸载、热重载。
+//!
+//! 设计约束：mlua 的 `Lua` 不是 Send（含 Rc），因此所有 Lua 操作必须在
+//! 同一线程（GUI 主线程）执行。`PluginManager` 不跨线程共享，直接在
+//! GUI 线程持有。热重载检测线程只扫描文件并发送"重载请求"到 channel，
+//! 由 GUI 线程调用 `poll_reload_requests()` 实际执行重载。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::SystemTime;
+
+use mlua::Lua;
+
+use crate::config::FocusFlowConfig;
+use crate::db;
+use crate::paths;
+use crate::plugins::host;
+use crate::plugins::PluginView;
+
+/// 插件信息。
+pub struct PluginInfo {
+    pub name: String,
+    pub desc: String,
+    pub version: String,
+    pub author: String,
+    pub file_path: PathBuf,
+    pub file_mtime: Option<SystemTime>,
+    pub loaded: bool,
+    pub error: Option<String>,
+    /// 插件 Lua 环境（仅 GUI 线程访问）
+    pub lua: Option<Lua>,
+    /// 插件声明的视图（get_view() 结果缓存）
+    pub view: Option<PluginView>,
+}
+
+/// 插件元数据（从 Lua 脚本读取）。
+struct PluginMeta {
+    name: String,
+    desc: String,
+    version: String,
+    author: String,
+    has_init: bool,
+    has_view: bool,
+}
+
+/// 插件管理器（GUI 线程专用，不跨线程共享）。
+pub struct PluginManager {
+    config: &'static FocusFlowConfig,
+    db: Arc<db::Database>,
+    plugins: HashMap<String, PluginInfo>,
+    /// 热重载停止标志
+    stop_event: Arc<AtomicBool>,
+    /// 热重载检测线程句柄
+    hot_reload_thread: Option<std::thread::JoinHandle<()>>,
+    /// 重载请求接收端（GUI 线程 poll）
+    reload_rx: mpsc::Receiver<String>,
+    /// 重载请求发送端（检测线程用）
+    reload_tx: mpsc::Sender<String>,
+}
+
+impl PluginManager {
+    pub fn new(config: &'static FocusFlowConfig, db: Arc<db::Database>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            config,
+            db,
+            plugins: HashMap::new(),
+            stop_event: Arc::new(AtomicBool::new(false)),
+            hot_reload_thread: None,
+            reload_rx: rx,
+            reload_tx: tx,
+        }
+    }
+
+    /// 插件目录。
+    fn plugins_dir(&self) -> PathBuf {
+        paths::plugins_dir()
+    }
+
+    /// 扫描插件目录，返回 .lua 文件列表。
+    pub fn discover(&self) -> Vec<PathBuf> {
+        let dir = self.plugins_dir();
+        std::fs::create_dir_all(&dir).ok();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().map(|e| e == "lua").unwrap_or(false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    /// 从 Lua 脚本读取元数据（不执行 init）。
+    fn read_meta(&self, path: &Path) -> Result<PluginMeta, String> {
+        let lua = Lua::new();
+        let script = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let _ = host::register_host_api(&lua, self.config, Arc::clone(&self.db))
+            .map_err(|e| format!("宿主 API 注册失败: {e}"))?;
+        lua.load(&script)
+            .set_name(path.file_name().and_then(|n| n.to_str()).unwrap_or("plugin"))
+            .exec()
+            .map_err(|e| format!("Lua 执行失败: {e}"))?;
+
+        let globals = lua.globals();
+        let gstr = |key: &str, def: &str| -> String {
+            globals
+                .get::<mlua::String>(key)
+                .ok()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_else(|| def.to_string())
+        };
+        let name = gstr(
+            "PLUGIN_NAME",
+            path.file_stem().and_then(|s| s.to_str()).unwrap_or("plugin"),
+        );
+        let desc = gstr("PLUGIN_DESC", "");
+        let version = gstr("PLUGIN_VERSION", "1.0");
+        let author = gstr("PLUGIN_AUTHOR", "");
+        let has_fn = |key: &str| -> bool { globals.get::<mlua::Function>(key).is_ok() };
+
+        Ok(PluginMeta {
+            name,
+            desc,
+            version,
+            author,
+            has_init: has_fn("init"),
+            has_view: has_fn("get_view"),
+        })
+    }
+
+    /// 加载单个插件文件。
+    pub fn load_plugin(&mut self, path: &Path) -> Result<String, String> {
+        let meta = self.read_meta(path)?;
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+
+        let lua = Lua::new();
+        host::register_host_api(&lua, self.config, Arc::clone(&self.db))
+            .map_err(|e| format!("宿主 API 注册失败: {e}"))?;
+        let script = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        lua.load(&script)
+            .set_name(&meta.name)
+            .exec()
+            .map_err(|e| format!("Lua 执行失败: {e}"))?;
+
+        if meta.has_init {
+            let init: mlua::Function = lua.globals().get("init").map_err(|e| e.to_string())?;
+            let _: () = init.call(()).map_err(|e| format!("init() 失败: {e}"))?;
+        }
+
+        let view = if meta.has_view {
+            Self::read_view(&lua).ok()
+        } else {
+            None
+        };
+
+        let info = PluginInfo {
+            name: meta.name,
+            desc: meta.desc,
+            version: meta.version,
+            author: meta.author,
+            file_path: path.to_path_buf(),
+            file_mtime: mtime,
+            loaded: true,
+            error: None,
+            lua: Some(lua),
+            view,
+        };
+
+        self.plugins.insert(info.name.clone(), info);
+        tracing::info!("插件加载成功: {}", self.plugins.len());
+        // 返回刚加载的插件名
+        let name = self
+            .plugins
+            .values()
+            .find(|p| p.file_path == path)
+            .map(|p| p.name.clone())
+            .ok_or_else(|| "加载后未找到插件".to_string())?;
+        Ok(name)
+    }
+
+    /// 从插件 Lua 环境读取 get_view() 返回值（声明式 UI 表）。
+    fn read_view(lua: &Lua) -> mlua::Result<PluginView> {
+        let get_view: mlua::Function = lua.globals().get("get_view")?;
+        let view_val: mlua::Value = get_view.call(())?;
+        let mut view = PluginView::default();
+        if let mlua::Value::Table(t) = view_val {
+            if let Ok(title) = t.get::<String>("title") {
+                view.title = title;
+            }
+            if let Ok(widgets) = t.get::<mlua::Table>("widgets") {
+                for (_, w) in widgets.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    if let Ok(widget) = parse_widget(&w) {
+                        view.widgets.push(widget);
+                    }
+                }
+            }
+        }
+        Ok(view)
+    }
+
+    /// 卸载插件。
+    pub fn unload_plugin(&mut self, name: &str) -> bool {
+        if let Some(mut info) = self.plugins.remove(name) {
+            if let Some(lua) = &mut info.lua {
+                if let Ok(cleanup) = lua.globals().get::<mlua::Function>("cleanup") {
+                    let _: mlua::Result<()> = cleanup.call(());
+                }
+            }
+            info.loaded = false;
+            info.lua = None;
+            tracing::info!("插件已卸载: {name}");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 重新加载插件（按文件名或插件名匹配）。
+    pub fn reload_plugin(&mut self, key: &str) -> bool {
+        // 先按插件名匹配，再按文件名匹配
+        let path = self
+            .plugins
+            .get(key)
+            .map(|p| p.file_path.clone())
+            .or_else(|| {
+                self.plugins
+                    .values()
+                    .find(|p| p.file_path.file_stem().and_then(|s| s.to_str()) == Some(key))
+                    .map(|p| p.file_path.clone())
+            });
+        match path {
+            Some(p) => {
+                // 找到插件名用于卸载
+                let pname = self
+                    .plugins
+                    .values()
+                    .find(|x| x.file_path == p)
+                    .map(|x| x.name.clone());
+                if let Some(n) = &pname {
+                    self.unload_plugin(n);
+                }
+                self.load_plugin(&p).is_ok()
+            }
+            None => false,
+        }
+    }
+
+    /// 加载所有插件。
+    pub fn load_all(&mut self) {
+        for path in self.discover() {
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("plugin").to_string();
+            if !self.plugins.contains_key(&name) {
+                let _ = self.load_plugin(&path);
+            }
+        }
+    }
+
+    /// 获取插件列表。
+    pub fn get_all_plugins(&self) -> Vec<&PluginInfo> {
+        self.plugins.values().collect()
+    }
+
+    /// 获取单个插件。
+    pub fn get_plugin(&self, name: &str) -> Option<&PluginInfo> {
+        self.plugins.get(name)
+    }
+
+    /// 启用热重载：启动检测线程（只扫描文件，不执行 Lua）。
+    pub fn enable_hot_reload(&mut self) {
+        if self.hot_reload_thread.is_some() {
+            return;
+        }
+        self.stop_event.store(false, Ordering::SeqCst);
+        let stop = Arc::clone(&self.stop_event);
+        let tx = self.reload_tx.clone();
+        let dir = self.plugins_dir();
+        let handle = std::thread::Builder::new()
+            .name("plugin-hot-reload".into())
+            .spawn(move || hot_reload_loop(dir, tx, stop))
+            .expect("启动热重载线程失败");
+        self.hot_reload_thread = Some(handle);
+        tracing::info!("插件热重载已启用");
+    }
+
+    /// 禁用热重载。
+    pub fn disable_hot_reload(&mut self) {
+        self.stop_event.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.hot_reload_thread.take() {
+            let _ = handle.join();
+        }
+        tracing::info!("插件热重载已禁用");
+    }
+
+    /// GUI 线程轮询：处理热重载请求。返回本次重载的插件名列表。
+    pub fn poll_reload_requests(&mut self) -> Vec<String> {
+        let mut reloaded = Vec::new();
+        while let Ok(name) = self.reload_rx.try_recv() {
+            if self.reload_plugin(&name) {
+                reloaded.push(name);
+            }
+        }
+        reloaded
+    }
+}
+
+/// 热重载检测循环：扫描插件目录 mtime，变更时发送重载请求。
+/// 不执行 Lua（Lua 非 Send，只能在 GUI 线程）。
+fn hot_reload_loop(dir: PathBuf, tx: mpsc::Sender<String>, stop: Arc<AtomicBool>) {
+    let mut last_mtime: HashMap<String, Option<SystemTime>> = HashMap::new();
+    let mut first_scan = true;
+    while !stop.load(Ordering::SeqCst) {
+        // 扫描目录
+        let mut seen: HashMap<String, Option<SystemTime>> = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map(|e| e == "lua").unwrap_or(false) {
+                    let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    if !name.is_empty() {
+                        let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+                        seen.insert(name, mtime);
+                    }
+                }
+            }
+        }
+        if first_scan {
+            last_mtime = seen;
+            first_scan = false;
+        } else {
+            // 检测变更（mtime 变化或新文件）
+            for (name, mtime) in &seen {
+                let changed = match last_mtime.get(name) {
+                    Some(prev) => *prev != *mtime,
+                    None => true, // 新文件
+                };
+                if changed {
+                    tracing::info!("热重载检测到变更: {name}");
+                    let _ = tx.send(name.clone());
+                }
+            }
+            last_mtime = seen;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+    }
+}
+
+/// 解析 Lua 表为声明式控件。
+fn parse_widget(w: &mlua::Table) -> mlua::Result<crate::plugins::Widget> {
+    let wtype: String = w.get("type")?;
+    use crate::plugins::Widget;
+    match wtype.as_str() {
+        "label" => Ok(Widget::Label(w.get("text").unwrap_or_default())),
+        "heading" => Ok(Widget::Heading(w.get("text").unwrap_or_default())),
+        "keyvalue" => Ok(Widget::KeyValue(
+            w.get("key").unwrap_or_default(),
+            w.get("value").unwrap_or_default(),
+        )),
+        "separator" => Ok(Widget::Separator),
+        "textarea" => Ok(Widget::TextArea(w.get("text").unwrap_or_default())),
+        "button" => Ok(Widget::Button {
+            id: w.get("id").unwrap_or_default(),
+            text: w.get("text").unwrap_or_default(),
+        }),
+        "table" => {
+            let headers: Vec<String> = w.get("headers").unwrap_or_default();
+            let mut rows = Vec::new();
+            if let Ok(rows_val) = w.get::<mlua::Table>("rows") {
+                for (_, row) in rows_val.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    let mut cols = Vec::new();
+                    for (_, v) in row.pairs::<mlua::Value, mlua::Value>().flatten() {
+                        if let Ok(s) = v.to_string() {
+                            cols.push(s);
+                        }
+                    }
+                    rows.push(cols);
+                }
+            }
+            Ok(Widget::Table { headers, rows })
+        }
+        _ => Ok(Widget::Label(format!("[未知控件: {wtype}]"))),
+    }
+}
