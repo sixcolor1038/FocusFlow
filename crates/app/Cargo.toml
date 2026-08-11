@@ -1,0 +1,17 @@
+[package]
+name = "focusflow-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+focusflow-core = { path = "../core" }
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+
+# GUI: egui / eframe（即时模式，中文需捆绑字体）
+eframe = { version = "0.36", features = ["default_fonts", "persistence", "wayland", "x11"] }
+egui = "0.36"
