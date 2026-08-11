@@ -12,6 +12,7 @@ FocusFlow 主界面 GUI 模块（性能优化版）
 
 import os
 import time
+import queue
 import threading
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, List
@@ -333,6 +334,8 @@ class FocusFlowApp:
         self._stats_pending = False
         self._summary_thread = None
         self._summary_pending = False
+        # 后台线程 -> 主线程 安全回调队列（Tkinter 不允许后台线程直接 root.after）
+        self._bg_queue: 'queue.Queue' = queue.Queue()
 
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
 
@@ -1238,6 +1241,28 @@ class FocusFlowApp:
         ttk.Label(info_bar,
                   text=f"  v{info.version}  作者：{info.author or '未知'}",
                   style='Subtitle.TLabel').pack(side=tk.LEFT, padx=(8, 0))
+
+        # 注册窗口引用，便于复用与关闭时清理
+        # 注意：_on_close 必须先于按钮定义，否则 `command=_on_close`
+        # 会因前向引用抛 UnboundLocalError，导致插件窗口一片空白（v1.2.10 回归）
+        if not hasattr(self, '_plugin_windows'):
+            self._plugin_windows = {}
+        self._plugin_windows[plugin_name] = top
+
+        # 窗口关闭时清理引用并保存尺寸
+        def _on_close():
+            try:
+                if top.state() == 'normal':
+                    set_ui_state(_state_section, 'geometry', top.geometry())
+            except Exception:
+                pass
+            try:
+                self._plugin_windows.pop(plugin_name, None)
+            except Exception:
+                pass
+            top.destroy()
+        top.protocol("WM_DELETE_WINDOW", _on_close)
+
         ttk.Button(info_bar, text="关闭窗口",
                    command=_on_close).pack(side=tk.RIGHT)
 
@@ -1260,24 +1285,6 @@ class FocusFlowApp:
                       foreground='#d13438', justify='left').pack(pady=40)
             log.error('插件窗口视图加载失败 %s: %s', plugin_name, e, exc_info=True)
 
-        # 注册窗口引用，便于复用与关闭时清理
-        if not hasattr(self, '_plugin_windows'):
-            self._plugin_windows = {}
-        self._plugin_windows[plugin_name] = top
-
-        # 窗口关闭时清理引用并保存尺寸
-        def _on_close():
-            try:
-                if top.state() == 'normal':
-                    set_ui_state(_state_section, 'geometry', top.geometry())
-            except Exception:
-                pass
-            try:
-                self._plugin_windows.pop(plugin_name, None)
-            except Exception:
-                pass
-            top.destroy()
-        top.protocol("WM_DELETE_WINDOW", _on_close)
         # 拖动/缩放后（防抖）保存尺寸
         try:
             top.bind('<Configure>',
@@ -1908,7 +1915,7 @@ class FocusFlowApp:
         self._stats_thread.start()
 
     def _stats_worker(self, days, target_date, year):
-        """后台线程：执行统计查询并调度回主线程更新 UI"""
+        """后台线程：执行统计查询并通过线程安全队列调度回主线程更新 UI"""
         try:
             import database
             if target_date:
@@ -1917,10 +1924,10 @@ class FocusFlowApp:
                 total, key_stats = database.get_stats(None, year=year)
             else:
                 total, key_stats = database.get_stats(days)
-            self.root.after(0, lambda: self._apply_stats_result(total, key_stats))
+            self._bg_queue.put(lambda: self._apply_stats_result(total, key_stats))
         except Exception as e:
             log.error('后台统计查询失败: %s', e, exc_info=True)
-            self.root.after(0, lambda: self._apply_stats_result(None, {}))
+            self._bg_queue.put(lambda: self._apply_stats_result(None, {}))
 
     def _apply_stats_result(self, total, key_stats):
         """主线程：应用统计查询结果（含 pending 重查逻辑）"""
@@ -2238,6 +2245,24 @@ class FocusFlowApp:
     def _start_auto_refresh(self):
         self._incremental_tick()
         self._full_tick()
+        self._drain_bg_queue()
+
+    def _drain_bg_queue(self):
+        """在主线程轮询执行后台线程提交的 UI 更新任务（Tk 线程安全）
+
+        后台查询线程不允许直接调用 root.after（非线程安全，主循环未运行或
+        退出时会抛 RuntimeError），统一投递到队列由主线程执行。
+        """
+        try:
+            while True:
+                func = self._bg_queue.get_nowait()
+                try:
+                    func()
+                except Exception:
+                    log.debug('后台队列任务执行异常', exc_info=True)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._drain_bg_queue)
 
     def _incremental_tick(self):
         """增量刷新：只更新今日次数和 CPM（轻量，不查统计表）
@@ -2294,7 +2319,7 @@ class FocusFlowApp:
         try:
             import database
             daily = database.get_daily_counts(7)
-            self.root.after(0, lambda: self._apply_summary(daily))
+            self._bg_queue.put(lambda: self._apply_summary(daily))
         except Exception as e:
             log.debug('后台摘要查询异常: %s', e)
 
