@@ -11,6 +11,7 @@ FocusFlow 主界面 GUI 模块（性能优化版）
 """
 
 import os
+import time
 import threading
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, List
@@ -235,6 +236,83 @@ KEY_GROUP_ORDER = ['字母键', '数字键', '功能键', '修饰键', '编辑�
                    '鼠标点击', '滚轮', '其他']
 
 
+# ==================== 后台低频 GC + 内存监控 ====================
+_GC_INTERVAL_SECONDS = 300  # 每 5 分钟一次，替代原来主线程 30 秒一次的 STW 全量回收
+_MEM_WARN_MB = 1500          # 内存超过该值（MB）时告警并追加一次回收
+
+
+def _process_rss_mb() -> float:
+    """获取当前进程常驻内存（Windows），失败返回 0"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        psapi = ctypes.windll.psapi
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        if psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            return pmc.WorkingSetSize / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _background_gc_loop():
+    """后台低频垃圾回收线程
+
+    长时间运行的 Tkinter 程序会产生循环引用（如已关闭的弹窗、PhotoImage 等），
+    需要周期性触发分代回收。旧版在主线程每 30 秒 gc.collect()，
+    会 STW 阻塞所有线程（包括 pynput 的键盘钩子线程），可能造成打字卡顿。
+    这里改为 daemon 线程、频率降到每 5 分钟一次，并顺带记录内存占用。
+    """
+    while True:
+        time.sleep(_GC_INTERVAL_SECONDS)
+        try:
+            rss_mb = _process_rss_mb()
+            import gc
+            gc.collect()
+            if rss_mb > 0:
+                if rss_mb > _MEM_WARN_MB:
+                    log.warning('进程内存偏高 %.0f MB，已执行一次额外回收', rss_mb)
+                    gc.collect()
+                else:
+                    log.info('周期 GC 完成，当前内存约 %.0f MB', rss_mb)
+        except Exception as e:
+            log.debug('后台 GC 异常: %s', e)
+
+
+_bg_gc_started = False
+_bg_gc_lock = threading.Lock()
+
+
+def _ensure_background_gc():
+    """确保后台 GC 线程只启动一次"""
+    global _bg_gc_started
+    if _bg_gc_started:
+        return
+    with _bg_gc_lock:
+        if _bg_gc_started:
+            return
+        _bg_gc_started = True
+        threading.Thread(target=_background_gc_loop, daemon=True,
+                         name='bg-gc').start()
+
+
 # ==================== 主应用 ====================
 class FocusFlowApp:
     def __init__(self, hidden: bool = False):
@@ -247,12 +325,19 @@ class FocusFlowApp:
         self.current_date: Optional[date] = None
         self.current_year: Optional[int] = None
         self._quitting = False
-        self._gc_tick_count = 0
         self._theme = config.get('gui', 'theme', 'light')
         self._trend_canvas = None
         self._trend_data = []  # 缓存趋势数据，避免重复查询
+        # 后台统计查询（避免在主线程做 SQLite 聚合查询导致 GIL 阻塞打字/界面）
+        self._stats_thread = None
+        self._stats_pending = False
+        self._summary_thread = None
+        self._summary_pending = False
 
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
+
+        # 启动后台低频 GC（替代主线程周期性 gc.collect()，避免打字卡顿）
+        _ensure_background_gc()
 
         self._apply_theme()
         self._set_window_icon()
@@ -1154,7 +1239,7 @@ class FocusFlowApp:
                   text=f"  v{info.version}  作者：{info.author or '未知'}",
                   style='Subtitle.TLabel').pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(info_bar, text="关闭窗口",
-                   command=top.destroy).pack(side=tk.RIGHT)
+                   command=_on_close).pack(side=tk.RIGHT)
 
         # 内容区
         content = ttk.Frame(top)
@@ -1788,32 +1873,60 @@ class FocusFlowApp:
 
     # ---------- 数据刷新 ----------
     def refresh_stats(self, full: bool = False):
-        """刷新统计（键鼠合并）
+        """刷新统计（键鼠合并）· 异步版
 
-        优化：只更新当前可见的标签页，不重绘所有表格
-        趋势图只在切换到趋势标签页或全量刷新时更新
+        优化：
+        - 只更新当前可见的标签页，不重绘所有表格
+        - SQLite 聚合查询放到后台线程执行，避免在主线程占用 GIL
+          （pynput 键盘钩子回调同样被 GIL 阻塞，主线程卡顿会直接导致打字延迟/丢键）
         """
         try:
             import database
-            # 更新年度下拉（轻量操作）
+            # 更新年度下拉（轻量操作，主线程直接执行）
             self._update_year_combo()
 
-            # 今日活跃 = 键盘+鼠标输入数
+            # 今日活跃 = 键盘+鼠标输入数（内存缓存值，极快，立即更新）
             today = database.get_today_count()
             self.today_label.config(text=f"{today:,}")
+        except Exception as e:
+            log.debug('刷新统计(快速部分)异常: %s', e)
 
-            # 周期总数 + 键鼠排行
-            if self.current_date:
-                total, key_stats = database.get_stats_by_date(
-                    self.current_date)
-            elif self.current_year:
-                total, key_stats = database.get_stats(
-                    None, year=self.current_year)
+        # 周期总数 + 键鼠排行：后台线程查询，避免阻塞主线程
+        # 快照当前查询参数，避免线程执行期间被用户切换
+        days = self.current_days
+        target_date = self.current_date
+        year = self.current_year
+
+        # 防堆积：已有查询在跑时只标记“最新优先”，跑完后自动再查一次
+        if getattr(self, '_stats_thread', None) and self._stats_thread.is_alive():
+            self._stats_pending = True
+            return
+        self._stats_pending = False
+        self._stats_thread = threading.Thread(
+            target=self._stats_worker, args=(days, target_date, year),
+            daemon=True, name='stats-refresh')
+        self._stats_thread.start()
+
+    def _stats_worker(self, days, target_date, year):
+        """后台线程：执行统计查询并调度回主线程更新 UI"""
+        try:
+            import database
+            if target_date:
+                total, key_stats = database.get_stats_by_date(target_date)
+            elif year:
+                total, key_stats = database.get_stats(None, year=year)
             else:
-                total, key_stats = database.get_stats(self.current_days)
-            self.total_label.config(text=f"{total:,}")
+                total, key_stats = database.get_stats(days)
+            self.root.after(0, lambda: self._apply_stats_result(total, key_stats))
+        except Exception as e:
+            log.error('后台统计查询失败: %s', e, exc_info=True)
+            self.root.after(0, lambda: self._apply_stats_result(None, {}))
 
-            if full:
+    def _apply_stats_result(self, total, key_stats):
+        """主线程：应用统计查询结果（含 pending 重查逻辑）"""
+        try:
+            if total is not None:
+                self.total_label.config(text=f"{total:,}")
                 # 只更新当前视图
                 cv = getattr(self, '_current_view', '键鼠排行')
                 if cv == "键鼠排行":
@@ -1821,8 +1934,11 @@ class FocusFlowApp:
                 elif cv == "分组统计":
                     self._refresh_group_table(key_stats, total)
                 # 其他视图由各自的刷新按钮或 _refresh_current_view 处理
+            if getattr(self, '_stats_pending', False):
+                self._stats_pending = False
+                self.refresh_stats(full=True)
         except Exception as e:
-            log.error('刷新统计失败: %s', e, exc_info=True)
+            log.debug('应用统计结果失败: %s', e)
 
     def _update_year_combo(self):
         import database
@@ -2148,30 +2264,42 @@ class FocusFlowApp:
         self.root.after(interval, self._incremental_tick)
 
     def _full_tick(self):
-        """全量刷新：重绘表格 + 更新摘要（10秒一次，降低延迟）"""
+        """全量刷新：重绘表格 + 更新摘要（10秒一次，降低延迟）
+
+        说明：周期性垃圾回收已移至后台 daemon 线程（见 _ensure_background_gc），
+        主线程不再执行 STW 的 gc.collect()，避免打字卡顿。
+        """
         try:
             # 非阻塞 flush：只发信号让后台写入线程尽快落库，不等待，避免界面卡顿
             import database
             database.flush_now(wait=False)
             self.refresh_stats(full=True)
             self._refresh_summary()
-            # 周期性手动回收：Tkinter 长时间运行会产生少量循环引用，
-            # Python 的 gc 默认分代收集不一定及时回收，这里约每 30 秒强制一次
-            self._gc_tick_count += 1
-            if self._gc_tick_count >= 3:
-                self._gc_tick_count = 0
-                import gc
-                gc.collect()
         except Exception as e:
             log.debug('全量刷新异常: %s', e)
         interval = config.getint('gui', 'full_refresh_interval', 10) * 1000
         self.root.after(interval, self._full_tick)
 
     def _refresh_summary(self):
-        """刷新日均和最高单日统计"""
+        """刷新日均和最高单日统计（后台线程查询，避免阻塞主线程/打字）"""
+        if getattr(self, '_summary_thread', None) and self._summary_thread.is_alive():
+            self._summary_pending = True
+            return
+        self._summary_pending = False
+        self._summary_thread = threading.Thread(
+            target=self._summary_worker, daemon=True, name='summary-refresh')
+        self._summary_thread.start()
+
+    def _summary_worker(self):
         try:
             import database
             daily = database.get_daily_counts(7)
+            self.root.after(0, lambda: self._apply_summary(daily))
+        except Exception as e:
+            log.debug('后台摘要查询异常: %s', e)
+
+    def _apply_summary(self, daily):
+        try:
             if daily:
                 counts = [c for _, c in daily]
                 avg = sum(counts) // len(counts) if counts else 0
@@ -2181,8 +2309,11 @@ class FocusFlowApp:
             else:
                 self.avg_label.config(text="--")
                 self.max_label.config(text="--")
+            if getattr(self, '_summary_pending', False):
+                self._summary_pending = False
+                self._refresh_summary()
         except Exception as e:
-            log.debug('刷新摘要异常: %s', e)
+            log.debug('应用摘要失败: %s', e)
 
     # ---------- 窗口控制 ----------
     def hide_window(self):

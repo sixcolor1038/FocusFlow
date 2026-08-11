@@ -29,6 +29,42 @@ _MODIFIER_KEYS = {
 }
 _FUNCTION_KEYS = {f'F{i}' for i in range(1, 13)}
 
+# 特殊键映射表（pynput Key.name -> 显示名）
+# 模块级常量：避免在每次按键的热路径中重复创建字典，减少分配与 GC 压力
+_SPECIAL_KEY_MAP = {
+    'space': '空格', 'enter': '回车', 'return': '回车',
+    'backspace': '退格', 'tab': 'Tab',
+    'shift': 'Shift', 'shift_l': '左Shift', 'shift_r': '右Shift',
+    'ctrl': 'Ctrl', 'ctrl_l': '左Ctrl', 'ctrl_r': '右Ctrl',
+    'alt': 'Alt', 'alt_l': '左Alt', 'alt_r': '右Alt', 'alt_gr': 'AltGr',
+    'cmd': 'Win', 'cmd_l': '左Win', 'cmd_r': '右Win',
+    'caps_lock': 'CapsLock', 'esc': 'Esc', 'escape': 'Esc',
+    'delete': 'Delete', 'home': 'Home', 'end': 'End',
+    'page_up': 'PageUp', 'page_down': 'PageDown', 'insert': 'Insert',
+    'num_lock': 'NumLock', 'scroll_lock': 'ScrollLock',
+    'print_screen': 'PrintScreen', 'pause': 'Pause', 'menu': 'Menu',
+    'up': '↑', 'down': '↓', 'left': '←', 'right': '→',
+    'f1': 'F1', 'f2': 'F2', 'f3': 'F3', 'f4': 'F4',
+    'f5': 'F5', 'f6': 'F6', 'f7': 'F7', 'f8': 'F8',
+    'f9': 'F9', 'f10': 'F10', 'f11': 'F11', 'f12': 'F12',
+    'media_play_pause': '播放/暂停', 'media_volume_mute': '静音',
+    'media_volume_up': '音量+', 'media_volume_down': '音量-',
+    'media_previous': '上一曲', 'media_next': '下一曲',
+}
+
+# Ctrl+字母 控制字符 -> 物理键名（模块级常量）
+# 按住 Ctrl 时字母会变成控制字符（如 Ctrl+D → '\x04'），这里还原为物理键本身，
+# 使 Ctrl 键与字母键各自独立计数（按 Ctrl+D = 左Ctrl 1 次 + D 1 次）。
+_CTRL_CHAR_MAP = {
+    '\x01': 'A', '\x02': 'B', '\x03': 'C', '\x04': 'D',
+    '\x05': 'E', '\x06': 'F', '\x07': 'G', '\x08': 'H',
+    '\x09': 'I', '\x0a': 'J', '\x0b': 'K', '\x0c': 'L',
+    '\x0d': 'M', '\x0e': 'N', '\x0f': 'O', '\x10': 'P',
+    '\x11': 'Q', '\x12': 'R', '\x13': 'S', '\x14': 'T',
+    '\x15': 'U', '\x16': 'V', '\x17': 'W', '\x18': 'X',
+    '\x19': 'Y', '\x1a': 'Z', '\x7f': 'Delete',
+}
+
 
 def normalize_key(key) -> str:
     """规范化按键名
@@ -39,33 +75,12 @@ def normalize_key(key) -> str:
     3. 组合键状态下的字符：char 可能是控制字符（如 Ctrl+C 返回 '\x03'）
 
     本函数将所有按键统一映射为可读的中文名。
+    性能：所有映射表均为模块级常量，热路径不产生分配。
     """
-    # 特殊键映射表（pynput Key.name -> 显示名）
-    SPECIAL_KEY_MAP = {
-        'space': '空格', 'enter': '回车', 'return': '回车',
-        'backspace': '退格', 'tab': 'Tab',
-        'shift': 'Shift', 'shift_l': '左Shift', 'shift_r': '右Shift',
-        'ctrl': 'Ctrl', 'ctrl_l': '左Ctrl', 'ctrl_r': '右Ctrl',
-        'alt': 'Alt', 'alt_l': '左Alt', 'alt_r': '右Alt', 'alt_gr': 'AltGr',
-        'cmd': 'Win', 'cmd_l': '左Win', 'cmd_r': '右Win',
-        'caps_lock': 'CapsLock', 'esc': 'Esc', 'escape': 'Esc',
-        'delete': 'Delete', 'home': 'Home', 'end': 'End',
-        'page_up': 'PageUp', 'page_down': 'PageDown', 'insert': 'Insert',
-        'num_lock': 'NumLock', 'scroll_lock': 'ScrollLock',
-        'print_screen': 'PrintScreen', 'pause': 'Pause', 'menu': 'Menu',
-        'up': '↑', 'down': '↓', 'left': '←', 'right': '→',
-        'f1': 'F1', 'f2': 'F2', 'f3': 'F3', 'f4': 'F4',
-        'f5': 'F5', 'f6': 'F6', 'f7': 'F7', 'f8': 'F8',
-        'f9': 'F9', 'f10': 'F10', 'f11': 'F11', 'f12': 'F12',
-        'media_play_pause': '播放/暂停', 'media_volume_mute': '静音',
-        'media_volume_up': '音量+', 'media_volume_down': '音量-',
-        'media_previous': '上一曲', 'media_next': '下一曲',
-    }
-
     # 1. 先检查是否是 pynput 的 Key 枚举（特殊键）
     key_name = getattr(key, 'name', None)
     if key_name:
-        return SPECIAL_KEY_MAP.get(key_name, key_name)
+        return _SPECIAL_KEY_MAP.get(key_name, key_name)
 
     # 2. 尝试获取 char 属性（普通字符键）
     try:
@@ -73,18 +88,7 @@ def normalize_key(key) -> str:
         if char is not None and len(char) == 1:
             # 检查是否是控制字符（按住 Ctrl 时字母会变成控制字符，如 Ctrl+D → '\x04'）
             if ord(char) < 32 or ord(char) == 127:
-                # 控制字符：还原为物理键本身，而不是记成 "Ctrl+X" 组合键。
-                # 这样 Ctrl 键与字母键各自独立计数（按 Ctrl+D = 左Ctrl 1 次 + D 1 次）。
-                ctrl_map = {
-                    '\x01': 'A', '\x02': 'B', '\x03': 'C', '\x04': 'D',
-                    '\x05': 'E', '\x06': 'F', '\x07': 'G', '\x08': 'H',
-                    '\x09': 'I', '\x0a': 'J', '\x0b': 'K', '\x0c': 'L',
-                    '\x0d': 'M', '\x0e': 'N', '\x0f': 'O', '\x10': 'P',
-                    '\x11': 'Q', '\x12': 'R', '\x13': 'S', '\x14': 'T',
-                    '\x15': 'U', '\x16': 'V', '\x17': 'W', '\x18': 'X',
-                    '\x19': 'Y', '\x1a': 'Z', '\x7f': 'Delete',
-                }
-                return ctrl_map.get(char, f'Ctrl+{ord(char)}')
+                return _CTRL_CHAR_MAP.get(char, f'Ctrl+{ord(char)}')
             # 普通可见字符
             return char.upper()
     except (AttributeError, TypeError):
@@ -95,7 +99,7 @@ def normalize_key(key) -> str:
     # 去掉 Key. 前缀
     if key_str.startswith('Key.'):
         key_str = key_str[4:]
-    return SPECIAL_KEY_MAP.get(key_str, key_str)
+    return _SPECIAL_KEY_MAP.get(key_str, key_str)
 
 
 # 鼠标按键名映射（pynput mouse.Button -> 显示名）
