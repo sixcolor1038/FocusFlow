@@ -54,7 +54,7 @@ pub struct FocusFlowApp {
 impl FocusFlowApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self {
-            state: AppState::new().expect("初始化应用状态失败"),
+            state: AppState::new(),
             font_ready: false,
         };
         app.setup_fonts(cc);

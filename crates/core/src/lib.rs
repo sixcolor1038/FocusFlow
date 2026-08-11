@@ -4,8 +4,11 @@
 //! 等纯逻辑模块也将放在此 crate 中（无 GUI 依赖，可被 CLI 与 GUI 复用）。
 
 pub mod config;
+pub mod db;
+pub mod listener;
 pub mod logger;
 pub mod paths;
+pub mod stats;
 
 pub use config::FocusFlowConfig;
 pub use logger::init_logging;

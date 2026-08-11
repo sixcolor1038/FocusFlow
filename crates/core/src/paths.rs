@@ -10,6 +10,7 @@
 //! 运行时数据与 exe 同级存放，保证"拷贝整个文件夹即可迁移数据"的既有产品形态。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::Datelike;
 
@@ -22,11 +23,33 @@ pub const APP_DESCRIPTION: &str = "FocusFlow - 效率与专注力分析工具";
 /// 版本号（后续从 Cargo 包版本自动生成）
 pub const APP_VERSION: &str = "0.1.0";
 
+/// 进程级 app_dir 覆盖（测试/部署指定数据目录用）。
+///
+/// 优先级：`set_app_dir` 显式设置 > 环境变量 `FOCUSFLOW_APP_DIR` > 当前工作目录。
+static APP_DIR_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn app_dir_override() -> &'static Mutex<Option<PathBuf>> {
+    APP_DIR_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// 显式设置程序目录（测试隔离用；也可在打包版指向 exe 目录）。
+pub fn set_app_dir(dir: impl Into<PathBuf>) {
+    *app_dir_override().lock().unwrap() = Some(dir.into());
+}
+
 /// 程序目录。
 ///
-/// 当前实现返回当前工作目录；后续 Windows 打包版应返回 exe 所在目录
-/// （`std::env::current_exe` 的父目录）。
+/// 优先使用 `set_app_dir` 显式设置或环境变量 `FOCUSFLOW_APP_DIR`，
+/// 否则取当前工作目录。
 pub fn app_dir() -> PathBuf {
+    if let Some(dir) = app_dir_override().lock().unwrap().clone() {
+        return dir;
+    }
+    if let Ok(dir) = std::env::var("FOCUSFLOW_APP_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

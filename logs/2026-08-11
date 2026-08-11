@@ -1,0 +1,94 @@
+2026-08-11T17:58:01.252857Z  INFO main ThreadId(01) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\logs\focusflow.log
+2026-08-11T17:58:01.267040Z  INFO main ThreadId(01) focusflow_core::db: 数据库初始化完成: C:\Users\sixco\AppData\Local\Temp\ff_dbg_main_62304\data\focusflow_2026.db (年份=2026)
+2026-08-11T17:58:01.272830Z  INFO main ThreadId(01) focusflow_core::db::writer: DB 写入线程已启动 (batch=50, interval=10s)
+2026-08-11T17:58:01.701724Z  INFO main ThreadId(01) focusflow_core::db::maintenance: 已备份 1 个年度库到 C:\Users\sixco\AppData\Local\Temp\ff_dbg_main_62304\backup
+2026-08-11T17:58:01.886867Z  INFO db-writer ThreadId(04) focusflow_core::db::writer: DB 写入线程已停止
+2026-08-11T17:58:01.906079Z  INFO      main ThreadId(01) focusflow_core::db: 数据库已关闭
+2026-08-11T18:05:13.980960Z  INFO main ThreadId(01) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\logs\focusflow.log
+2026-08-11T18:05:13.994236Z  INFO main ThreadId(01) focusflow_core::db: 数据库初始化完成: C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_56960\data\focusflow_2026.db (年份=2026)
+2026-08-11T18:05:13.999589Z  INFO main ThreadId(01) focusflow_core::db::writer: DB 写入线程已启动 (batch=50, interval=10s)
+2026-08-11T18:05:13.999643Z  INFO main ThreadId(01) focusflow_core::listener: 键鼠监听已启动 (ignore_modifiers=false, ignore_functions=false, mouse_enabled=true)
+2026-08-11T18:05:19.612699Z  INFO main ThreadId(01) focusflow_core::listener: 监听已 暂停
+2026-08-11T18:05:22.821309Z  INFO main ThreadId(01) focusflow_core::listener: 监听已 恢复
+2026-08-11T18:05:23.223062Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 鼠标左键
+2026-08-11T18:05:24.891312Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 鼠标左键
+2026-08-11T18:05:25.063204Z  INFO           main ThreadId(01) focusflow_core::db::maintenance: 已备份 1 个年度库到 C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_56960\backup
+2026-08-11T18:05:25.249528Z  INFO      db-writer ThreadId(04) focusflow_core::db::writer: DB 写入线程已停止
+2026-08-11T18:05:25.267698Z  INFO           main ThreadId(01) focusflow_core::db: 数据库已关闭
+2026-08-11T18:05:36.514146Z  INFO main ThreadId(01) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\logs\focusflow.log
+2026-08-11T18:05:36.534442Z  INFO main ThreadId(01) focusflow_core::db: 数据库初始化完成: C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_67384\data\focusflow_2026.db (年份=2026)
+2026-08-11T18:05:36.542887Z  INFO main ThreadId(01) focusflow_core::db::writer: DB 写入线程已启动 (batch=50, interval=10s)
+2026-08-11T18:05:36.542939Z  INFO main ThreadId(01) focusflow_core::listener: 键鼠监听已启动 (ignore_modifiers=false, ignore_functions=false, mouse_enabled=true)
+2026-08-11T18:05:40.011102Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 鼠标左键
+2026-08-11T18:05:42.051755Z  INFO           main ThreadId(01) focusflow_core::listener: 监听已 暂停
+2026-08-11T18:05:45.260193Z  INFO           main ThreadId(01) focusflow_core::listener: 监听已 恢复
+2026-08-11T18:05:47.677013Z  INFO           main ThreadId(01) focusflow_core::db::maintenance: 已备份 1 个年度库到 C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_67384\backup
+2026-08-11T18:05:47.859888Z  INFO      db-writer ThreadId(04) focusflow_core::db::writer: DB 写入线程已停止
+2026-08-11T18:05:47.879931Z  INFO           main ThreadId(01) focusflow_core::db: 数据库已关闭
+2026-08-11T18:06:18.460506Z  INFO main ThreadId(01) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\logs\focusflow.log
+2026-08-11T18:06:18.472980Z  INFO main ThreadId(01) focusflow_core::db: 数据库初始化完成: C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_63300\data\focusflow_2026.db (年份=2026)
+2026-08-11T18:06:18.478080Z  INFO main ThreadId(01) focusflow_core::db::writer: DB 写入线程已启动 (batch=50, interval=10s)
+2026-08-11T18:06:18.478138Z  INFO main ThreadId(01) focusflow_core::listener: 键鼠监听已启动 (ignore_modifiers=false, ignore_functions=false, mouse_enabled=true)
+2026-08-11T18:06:18.531803Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 空格
+2026-08-11T18:06:18.679058Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: Home
+2026-08-11T18:06:18.725039Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 左Shift
+2026-08-11T18:06:18.768202Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: End
+2026-08-11T18:06:18.854633Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 退格
+2026-08-11T18:06:18.956656Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 左Ctrl
+2026-08-11T18:06:19.001738Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: V
+2026-08-11T18:06:19.092710Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.141494Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.184602Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.229033Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.268820Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.279558Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: A
+2026-08-11T18:06:19.281841Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: S
+2026-08-11T18:06:19.290317Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 鼠标左键
+2026-08-11T18:06:19.291200Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 滚轮上滑
+2026-08-11T18:06:19.310410Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.353242Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.396822Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.443085Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: ←
+2026-08-11T18:06:19.482720Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: S
+2026-08-11T18:06:19.531573Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: I
+2026-08-11T18:06:19.574921Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:19.619494Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: C
+2026-08-11T18:06:19.664185Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: O
+2026-08-11T18:06:19.708208Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:19.753661Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: O
+2026-08-11T18:06:19.792396Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:19.834347Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:19.876330Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 0
+2026-08-11T18:06:19.918387Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 3
+2026-08-11T18:06:19.964143Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 8
+2026-08-11T18:06:20.012275Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:20.056845Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:20.102193Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:20.149430Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: →
+2026-08-11T18:06:20.192656Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: .
+2026-08-11T18:06:20.235637Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: C
+2026-08-11T18:06:20.280745Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: O
+2026-08-11T18:06:20.300110Z  INFO           main ThreadId(01) focusflow_core::listener: 监听已 暂停
+2026-08-11T18:06:23.508659Z  INFO           main ThreadId(01) focusflow_core::listener: 监听已 恢复
+2026-08-11T18:06:23.755041Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 鼠标左键
+2026-08-11T18:06:24.949922Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 左Ctrl
+2026-08-11T18:06:25.137434Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 左Alt
+2026-08-11T18:06:25.287199Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: Z
+2026-08-11T18:06:25.734197Z  INFO           main ThreadId(01) focusflow_core::db::maintenance: 已备份 1 个年度库到 C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_63300\backup
+2026-08-11T18:06:25.916301Z  INFO      db-writer ThreadId(04) focusflow_core::db::writer: DB 写入线程已停止
+2026-08-11T18:06:25.917441Z  INFO           main ThreadId(01) focusflow_core::db: 数据库已关闭
+2026-08-11T18:06:46.127634Z  INFO main ThreadId(01) focusflow_core::logger: 日志系统已初始化: E:\mydata\DeepSeekdata\code\FocusFlow-rs\logs\focusflow.log
+2026-08-11T18:06:46.142650Z  INFO main ThreadId(01) focusflow_core::db: 数据库初始化完成: C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_26464\data\focusflow_2026.db (年份=2026)
+2026-08-11T18:06:46.149531Z  INFO main ThreadId(01) focusflow_core::db::writer: DB 写入线程已启动 (batch=50, interval=10s)
+2026-08-11T18:06:46.149581Z  INFO main ThreadId(01) focusflow_core::listener: 键鼠监听已启动 (ignore_modifiers=false, ignore_functions=false, mouse_enabled=true)
+2026-08-11T18:06:46.952127Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: A
+2026-08-11T18:06:46.955869Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: R
+2026-08-11T18:06:46.959390Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: T
+2026-08-11T18:06:46.963794Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 鼠标左键
+2026-08-11T18:06:46.964551Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 滚轮上滑
+2026-08-11T18:06:47.979331Z  INFO           main ThreadId(01) focusflow_core::listener: 监听已 暂停
+2026-08-11T18:06:51.187784Z  INFO           main ThreadId(01) focusflow_core::listener: 监听已 恢复
+2026-08-11T18:06:52.363081Z  INFO input-listener ThreadId(05) listener_demo: [callback] 收到事件: 滚轮上滑
+2026-08-11T18:06:53.419255Z  INFO           main ThreadId(01) focusflow_core::db::maintenance: 已备份 1 个年度库到 C:\Users\sixco\AppData\Local\Temp\ff_rs_listener_26464\backup
+2026-08-11T18:06:53.600096Z  INFO      db-writer ThreadId(04) focusflow_core::db::writer: DB 写入线程已停止
+2026-08-11T18:06:53.603754Z  INFO           main ThreadId(01) focusflow_core::db: 数据库已关闭

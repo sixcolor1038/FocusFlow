@@ -1,0 +1,91 @@
+//! SQLite 连接管理。
+//!
+//! 镜像 Python 版 `database.py` 的连接与 schema：
+//! - WAL + synchronous=NORMAL + busy_timeout + cache_size
+//! - `key_log` / `meta` 表结构与索引与 Python 版完全一致（保证文件兼容）
+//! - 提供读写连接与只读连接两种打开方式
+
+use std::path::Path;
+
+use rusqlite::Connection;
+
+/// 打开一个可写连接并应用标准 PRAGMA。
+pub fn open_rw(path: &Path) -> anyhow::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let conn = Connection::open(path)?;
+    apply_rw_pragmas(&conn)?;
+    Ok(conn)
+}
+
+/// 打开一个只读连接（并发读安全，不产生 WAL 副作用）。
+pub fn open_ro(path: &Path) -> anyhow::Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
+    Ok(conn)
+}
+
+/// 应用与 Python 版一致的写入端 PRAGMA。
+fn apply_rw_pragmas(conn: &Connection) -> anyhow::Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
+    conn.pragma_update(None, "cache_size", -8000)?; // 8MB 缓存
+    Ok(())
+}
+
+/// 确保指定连接的年度库 schema 存在（幂等）。
+pub fn ensure_schema(conn: &Connection, year: i32) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS key_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_name TEXT NOT NULL,
+            timestamp INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_timestamp ON key_log(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_key_name ON key_log(key_name);
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );",
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('year', ?1)",
+        [year.to_string()],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_roundtrip() {
+        let dir = std::env::temp_dir().join("ff_rs_db_test");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("focusflow_2026.db");
+        std::fs::remove_file(&path).ok();
+
+        let conn = open_rw(&path).unwrap();
+        ensure_schema(&conn, 2026).unwrap();
+        conn.execute(
+            "INSERT INTO key_log (key_name, timestamp) VALUES ('A', 1), ('B', 2)",
+            [],
+        )
+        .unwrap();
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
