@@ -5,9 +5,46 @@
 //! - `key_log` / `meta` 表结构与索引与 Python 版完全一致（保证文件兼容）
 //! - 提供读写连接与只读连接两种打开方式
 
-use std::path::Path;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
+
+// 线程本地只读连接缓存：同一线程内按文件路径复用，避免每次查询重开连接。
+// 只读连接不参与写锁，WAL 模式下可安全并发；文件被替换/移动后通过
+// [`clear_ro_cache`] 失效（归档/导入/压缩时调用）。
+thread_local! {
+    static RO_POOL: RefCell<HashMap<PathBuf, Connection>> = RefCell::new(HashMap::new());
+}
+
+// 连接缓存上限：超过则整体清空，防止多年份库长期运行后无界增长。
+const RO_POOL_MAX: usize = 8;
+
+/// 使用缓存中的只读连接执行 `f`。连接不存在或打开失败时返回 `None`。
+pub fn with_ro_conn<T>(path: &Path, f: impl FnOnce(&Connection) -> T) -> Option<T> {
+    RO_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() > RO_POOL_MAX {
+            pool.clear();
+        }
+        if !pool.contains_key(path) {
+            match open_ro(path) {
+                Ok(conn) => {
+                    pool.insert(path.to_path_buf(), conn);
+                }
+                Err(_) => return None,
+            }
+        }
+        let conn = pool.get(path).unwrap();
+        Some(f(conn))
+    })
+}
+
+/// 清空只读连接缓存（归档/导入/压缩/删除数据后调用，避免持有失效句柄）。
+pub fn clear_ro_cache() {
+    RO_POOL.with(|pool| pool.borrow_mut().clear());
+}
 
 /// 打开一个可写连接并应用标准 PRAGMA。
 pub fn open_rw(path: &Path) -> anyhow::Result<Connection> {

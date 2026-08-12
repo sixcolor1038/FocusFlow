@@ -36,6 +36,8 @@ fn cache_key() -> String {
 pub fn invalidate_years_cache() {
     let mut c = years_cache().lock().unwrap();
     c.insert(cache_key(), (Instant::now() - YEARS_CACHE_TTL, vec![]));
+    // 数据文件可能被替换/移动，同时失效只读连接缓存
+    crate::db::connection::clear_ro_cache();
 }
 
 /// 获取所有有数据的年份列表（降序，带 30 秒缓存，按 app_dir 隔离）。
@@ -97,20 +99,19 @@ fn local_utc_offset_seconds() -> i64 {
 /// 查询单个年份库时间范围内计数。
 fn query_count_range(year: i32, start: i64, end: i64) -> i64 {
     let path = paths::year_db_path(year);
-    let conn = match connection::open_ro(&path) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-    match table_exists(&conn) {
-        false => 0,
-        true => conn
-            .query_row(
-                "SELECT COUNT(*) FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2",
-                rusqlite::params![start, end],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0),
-    }
+    connection::with_ro_conn(&path, |conn| {
+        match table_exists(conn) {
+            false => 0,
+            true => conn
+                .query_row(
+                    "SELECT COUNT(*) FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2",
+                    rusqlite::params![start, end],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0),
+        }
+    })
+    .unwrap_or(0)
 }
 
 fn table_exists(conn: &Connection) -> bool {
@@ -175,32 +176,31 @@ fn where_cutoff(days: Option<i64>) -> (String, Vec<i64>) {
 
 fn stats_single_year(year: i32, days: Option<i64>) -> (i64, HashMap<String, i64>) {
     let path = paths::year_db_path(year);
-    let conn = match connection::open_ro(&path) {
-        Ok(c) => c,
-        Err(_) => return (0, HashMap::new()),
-    };
-    if !table_exists(&conn) {
-        return (0, HashMap::new());
-    }
-    let (where_clause, params) = where_cutoff(days);
-    let total: i64 = {
-        let sql = format!("SELECT COUNT(*) FROM key_log {where_clause}");
-        conn.query_row(&sql, rusqlite::params_from_iter(params.iter()), |r| r.get(0))
-            .unwrap_or(0)
-    };
-    let map = {
-        let sql = format!(
-            "SELECT key_name, COUNT(*) as cnt FROM key_log {where_clause} GROUP BY key_name ORDER BY cnt DESC"
-        );
-        let mut stmt = conn.prepare(&sql).unwrap();
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })
-            .unwrap();
-        rows.flatten().collect()
-    };
-    (total, map)
+    let result: Option<Option<(i64, HashMap<String, i64>)>> = connection::with_ro_conn(&path, |conn| {
+        if !table_exists(conn) {
+            return None;
+        }
+        let (where_clause, params) = where_cutoff(days);
+        let total: i64 = {
+            let sql = format!("SELECT COUNT(*) FROM key_log {where_clause}");
+            conn.query_row(&sql, rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+                .unwrap_or(0)
+        };
+        let map = {
+            let sql = format!(
+                "SELECT key_name, COUNT(*) as cnt FROM key_log {where_clause} GROUP BY key_name ORDER BY cnt DESC"
+            );
+            let mut stmt = conn.prepare(&sql).unwrap();
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })
+                .unwrap();
+            rows.flatten().collect()
+        };
+        Some((total, map))
+    });
+    result.flatten().unwrap_or((0, HashMap::new()))
 }
 
 /// 跨年查询：第一个年份库为主库，ATTACH 其他。
@@ -211,30 +211,27 @@ fn stats_multi_year(years: &[i32], days: Option<i64>) -> (i64, HashMap<String, i
     };
     let main_year = *main_year;
     let path = paths::year_db_path(main_year);
-    let conn = match connection::open_ro(&path) {
-        Ok(c) => c,
-        Err(_) => return (0, HashMap::new()),
-    };
-    if !table_exists(&conn) {
-        return (0, HashMap::new());
-    }
-
-    // ATTACH 其他年份库
-    let mut aliases: Vec<String> = Vec::new();
-    for y in &years[1..] {
-        let alias = format!("y{y}");
-        let ypath = paths::year_db_path(*y);
-        if ypath.exists()
-            && conn
-                .execute(
-                    &format!("ATTACH DATABASE ?1 AS {alias}"),
-                    rusqlite::params![ypath.to_str().unwrap()],
-                )
-                .is_ok()
-        {
-            aliases.push(alias);
+    let result: Option<Option<(i64, HashMap<String, i64>)>> = connection::with_ro_conn(&path, |conn| {
+        if !table_exists(conn) {
+            return None;
         }
-    }
+
+        // ATTACH 其他年份库
+        let mut aliases: Vec<String> = Vec::new();
+        for y in &years[1..] {
+            let alias = format!("y{y}");
+            let ypath = paths::year_db_path(*y);
+            if ypath.exists()
+                && conn
+                    .execute(
+                        &format!("ATTACH DATABASE ?1 AS {alias}"),
+                        rusqlite::params![ypath.to_str().unwrap()],
+                    )
+                    .is_ok()
+            {
+                aliases.push(alias);
+            }
+        }
 
     let (where_clause, params) = where_cutoff(days);
     // 构建 UNION ALL 查询（每个子查询必须 GROUP BY key_name）
@@ -268,44 +265,45 @@ fn stats_multi_year(years: &[i32], days: Option<i64>) -> (i64, HashMap<String, i
         rows.flatten().collect()
     };
 
-    for alias in &aliases {
-        let _ = conn.execute(&format!("DETACH DATABASE {alias}"), []);
-    }
-    (total, map)
+        for alias in &aliases {
+            let _ = conn.execute(&format!("DETACH DATABASE {alias}"), []);
+        }
+        Some((total, map))
+    });
+    result.flatten().unwrap_or((0, HashMap::new()))
 }
 
 /// 查询指定日期统计。
 pub fn get_stats_by_date(target_date: chrono::NaiveDate) -> (i64, HashMap<String, i64>) {
     let path = paths::year_db_path(target_date.year());
-    let conn = match connection::open_ro(&path) {
-        Ok(c) => c,
-        Err(_) => return (0, HashMap::new()),
-    };
-    if !table_exists(&conn) {
-        return (0, HashMap::new());
-    }
-    let (start, end) = date_range_ts(target_date);
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2",
-            rusqlite::params![start, end],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let map: HashMap<String, i64> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT key_name, COUNT(*) as cnt FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY key_name ORDER BY cnt DESC",
+    let result: Option<Option<(i64, HashMap<String, i64>)>> = connection::with_ro_conn(&path, |conn| {
+        if !table_exists(conn) {
+            return None;
+        }
+        let (start, end) = date_range_ts(target_date);
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2",
+                rusqlite::params![start, end],
+                |r| r.get(0),
             )
-            .unwrap();
-        let rows = stmt
-            .query_map(rusqlite::params![start, end], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })
-            .unwrap();
-        rows.flatten().collect()
-    };
-    (total, map)
+            .unwrap_or(0);
+        let map: HashMap<String, i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT key_name, COUNT(*) as cnt FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY key_name ORDER BY cnt DESC",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(rusqlite::params![start, end], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })
+                .unwrap();
+            rows.flatten().collect()
+        };
+        Some((total, map))
+    });
+    result.flatten().unwrap_or((0, HashMap::new()))
 }
 
 /// 查询最近 N 天每日按键数：返回 [(YYYY-MM-DD, 次数)]。
@@ -337,47 +335,47 @@ pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
 
     let end_ts = local_day_start_ts(now.date_naive()) + 86_400;
 
+    let start_ts = local_day_start_ts(start);
+    // 优化：用本地时区偏移的整数分组代替 date() 函数（避免逐行函数调用）
+    let tz_offset = local_utc_offset_seconds();
     for y in &years_to_query {
         let path = paths::year_db_path(*y);
         if !path.exists() {
             continue;
         }
-        let conn = match connection::open_ro(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if !table_exists(&conn) {
-            continue;
-        }
-        let start_ts = local_day_start_ts(start);
-        // 优化：用本地时区偏移的整数分组代替 date() 函数（避免逐行函数调用）
-        let tz_offset = local_utc_offset_seconds();
-        let mut stmt = conn
-            .prepare(
-                &format!(
-                    "SELECT (timestamp + {tz_offset}) / 86400 as day, COUNT(*) as cnt \
-                     FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 \
-                     GROUP BY day"
-                ),
-            )
-            .unwrap();
-        let rows = stmt
-            .query_map(rusqlite::params![start_ts, end_ts], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-            })
-            .unwrap();
-        for row in rows.flatten() {
-            let day_epoch = row.0;
-            let cnt = row.1;
-            // day_epoch = 该日 00:00 的 UTC 秒（已含时区偏移）
-            let d = chrono::DateTime::from_timestamp(day_epoch, 0)
-                .map(|dt| dt.with_timezone(&chrono::Local).date_naive());
-            if let Some(d) = d {
-                if let Some(e) = daily_map.get_mut(&d) {
-                    *e += cnt;
+        connection::with_ro_conn(&path, |conn| {
+            if !table_exists(conn) {
+                return;
+            }
+            let mut stmt = conn
+                .prepare(
+                    &format!(
+                        "SELECT (timestamp + {tz_offset}) / 86400 as day, COUNT(*) as cnt \
+                         FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 \
+                         GROUP BY day"
+                    ),
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(rusqlite::params![start_ts, end_ts], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })
+                .unwrap();
+            for row in rows.flatten() {
+                let day_epoch = row.0;
+                let cnt = row.1;
+                // day_epoch 是自 1970-01-01 起的"天数"（UTC），先换算成当日零点的秒数
+                // 再转本地日期——修复曾把"天序号"误当"秒数"导致全部计数丢失的 bug。
+                let day_secs = day_epoch.saturating_mul(86_400);
+                let d = chrono::DateTime::from_timestamp(day_secs, 0)
+                    .map(|dt| dt.with_timezone(&chrono::Local).date_naive());
+                if let Some(d) = d {
+                    if let Some(e) = daily_map.get_mut(&d) {
+                        *e += cnt;
+                    }
                 }
             }
-        }
+        });
     }
 
     let mut result: Vec<(String, i64)> = daily_map
@@ -391,41 +389,47 @@ pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
 /// 查询指定日期每小时按键数（返回长度 24 的列表）。
 pub fn get_hourly_stats(target_date: Option<chrono::NaiveDate>) -> Vec<i64> {
     let d = target_date.unwrap_or_else(|| Local::now().date_naive());
-    let mut hourly = vec![0i64; 24];
     let path = paths::year_db_path(d.year());
-    let conn = match connection::open_ro(&path) {
-        Ok(c) => c,
-        Err(_) => return hourly,
-    };
-    if !table_exists(&conn) {
-        return hourly;
-    }
-    let (start, end) = date_range_ts(d);
-    let mut stmt = conn
-        .prepare(
-            "SELECT (timestamp - ?1) / 3600 as hour, COUNT(*) as cnt FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY hour",
-        )
-        .unwrap();
-    let rows = stmt
-        .query_map(rusqlite::params![start, end], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })
-        .unwrap();
-    for row in rows.flatten() {
-        let hour = row.0;
-        if (0..24).contains(&hour) {
-            hourly[hour as usize] = row.1;
+    let result: Option<Option<Vec<i64>>> = connection::with_ro_conn(&path, |conn| {
+        if !table_exists(conn) {
+            return None;
         }
-    }
-    hourly
+        let mut hourly = vec![0i64; 24];
+        let (start, end) = date_range_ts(d);
+        let mut stmt = conn
+            .prepare(
+                "SELECT (timestamp - ?1) / 3600 as hour, COUNT(*) as cnt FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY hour",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(rusqlite::params![start, end], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap();
+        for row in rows.flatten() {
+            let hour = row.0;
+            if (0..24).contains(&hour) {
+                hourly[hour as usize] = row.1;
+            }
+        }
+        Some(hourly)
+    });
+    result.flatten().unwrap_or_else(|| vec![0i64; 24])
 }
 
 /// 查询最近 N 天按星期统计（0=周一 ... 6=周日）。
 pub fn get_weekday_stats(days: i64) -> HashMap<i64, i64> {
-    let mut result: HashMap<i64, i64> = HashMap::new();
     let daily = get_daily_counts(days, None);
+    aggregate_weekday(&daily)
+}
+
+/// 从每日计数列表聚合星期分布（0=周一 ... 6=周日）。
+///
+/// 供 UI 复用已查得的每日计数，避免重复扫描数据库。
+pub fn aggregate_weekday(daily: &[(String, i64)]) -> HashMap<i64, i64> {
+    let mut result: HashMap<i64, i64> = HashMap::new();
     for (date_str, count) in daily {
-        if let Ok(d) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
             let weekday = d.weekday().num_days_from_monday() as i64;
             *result.entry(weekday).or_insert(0) += count;
         }

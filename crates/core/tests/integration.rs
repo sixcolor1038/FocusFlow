@@ -126,12 +126,30 @@ mod tests {
         let daily = db::get_daily_counts(7, None);
         assert!(!daily.is_empty());
         assert_eq!(daily.len(), 7, "应返回 7 天");
+        // 回归：daily 计数必须真实反映数据（曾因"天序号被当作秒"导致全为 0）
+        // 返回的是"近 7 天"升序列表：[5天前, 4天前, ..., 昨天, 今天]
+        assert_eq!(
+            daily[5].1, 10,
+            "昨天应为 10 条, got {:?}",
+            daily[5]
+        );
+        assert_eq!(
+            daily[6].1, 10,
+            "今天应为 10 条, got {:?}",
+            daily[6]
+        );
 
         let hour = focusflow_core::db::queries::get_hourly_stats(None);
         assert_eq!(hour.len(), 24);
+        assert!(hour.iter().sum::<i64>() >= 10, "今日小时分布应有数据");
 
         let wd = focusflow_core::db::queries::get_weekday_stats(7);
         assert!(wd.len() >= 1, "至少 1 天有数据");
+        assert!(
+            wd.values().sum::<i64>() >= 20,
+            "星期分布总数应 >= 20, got {:?}",
+            wd
+        );
 
         db.shutdown(&config);
     }

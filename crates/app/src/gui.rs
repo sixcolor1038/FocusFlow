@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::floating::FloatingWindow;
 use crate::hotkey::HotkeyManager;
 use crate::tray::Tray;
 use crate::views::{self, GroupView, HourlyView, RankView, StatsPanel, Theme, TrendView, WeekdayView};
@@ -27,12 +28,49 @@ pub struct SharedStats {
     pub rank: Vec<(String, i64)>,
     pub group: Vec<(&'static str, i64)>,
     pub trend: Vec<(String, i64)>,
+    pub trend30: Vec<(String, i64)>,
     pub hourly: Vec<i64>,
     pub weekday: Vec<(i64, i64)>,
 }
 
-/// 后台统计线程：每 2 秒查询一次 DB，写入共享数据。
-/// `refresh_now` 置 true 时立即刷新（周期切换即时响应）。
+/// 键鼠排行显示上限（控制渲染与拷贝开销）。
+const RANK_LIMIT: usize = 100;
+
+/// 从配置 `[gui]` 读取列宽比例（"a,b,c,d"），解析失败时用默认值。
+fn load_cols<const N: usize>(key: &str, default: [f32; N]) -> [f32; N] {
+    let raw = focusflow_core::config::instance().get_or("gui", key, "");
+    if raw.is_empty() {
+        return default;
+    }
+    let parts: Vec<&str> = raw.split(',').map(|p| p.trim()).collect();
+    if parts.len() != N {
+        return default;
+    }
+    let mut out = default;
+    for (i, p) in parts.iter().enumerate() {
+        if let Ok(v) = p.parse::<f32>() {
+            out[i] = v;
+        }
+    }
+    out
+}
+
+/// 列宽比例序列化为 "a,b,c,d"。
+fn cols_to_string(cols: &[f32]) -> String {
+    cols.iter()
+        .map(|f| format!("{f:.4}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 后台统计线程。
+///
+/// 两条节奏分离，解决"切换周期卡顿 / 主界面卡顿"：
+/// - **快节奏**：每 500ms 只读内存（今日活跃、当前速度），开销可忽略。
+/// - **慢节奏**：周期切换、或活跃时每 5s / 空闲每 `full_refresh_interval`s 才做一次
+///   重聚合（排行/分组/趋势/小时/星期）。重聚合前先本地复用上次结果，期间 UI 零阻塞。
+///
+/// 所有 DB 查询都在本线程完成（UI 线程 read_shared 只做一次轻量拷贝）。
 pub fn spawn_stats_worker(
     db: Arc<focusflow_core::db::Database>,
     config: &'static FocusFlowConfig,
@@ -43,47 +81,130 @@ pub fn spawn_stats_worker(
     std::thread::Builder::new()
         .name("stats-worker".into())
         .spawn(move || {
+            use std::time::Instant;
+            let idle_heavy_ms = (config.get_int("gui", "full_refresh_interval", 10).max(1) as u64) * 1000;
+            let active_heavy_ms = 5_000u64;
+            let tick_ms = 500u64;
+
+            // 本地持有上一次重聚合结果：快节奏轮次直接复用，避免重复扫描 DB
+            let mut h_total: i64 = 0;
+            let mut h_avg: i64 = 0;
+            let mut h_max: i64 = 0;
+            let mut h_rank: Vec<(String, i64)> = Vec::new();
+            let mut h_group: Vec<(&'static str, i64)> = Vec::new();
+            let mut h_trend: Vec<(String, i64)> = Vec::new();
+            let mut h_trend30: Vec<(String, i64)> = Vec::new();
+            let mut h_hourly: Vec<i64> = vec![0; 24];
+            let mut h_weekday: Vec<(i64, i64)> = Vec::new();
+
+            let mut prev_period: i64 = i64::MIN;
+            let mut last_heavy = Instant::now() - Duration::from_secs(3600);
             let mut prev_today_count: i64 = -1;
+
             loop {
                 let period_val = period.load(Ordering::Relaxed);
-
-                // 先做完全部 DB 查询（不持共享锁），最后一次性写入。
-                // 避免 UI 线程 read_shared 被长查询阻塞导致卡顿。
-                let today_count = db::get_today_count(db.writer().map(|w| w.as_ref()));
-                let cpm = focusflow_core::stats::cpm(config).get_cpm();
-                let (total, key_stats) = match period_val {
-                    -1 => db::get_stats_by_date(chrono::Local::now().date_naive()),
-                    0 => db::get_stats(None, None),
-                    n => db::get_stats(Some(n), None),
+                let forced = refresh_now.swap(false, Ordering::Relaxed);
+                let period_changed = period_val != prev_period;
+                let active = {
+                    let c = db.writer().map(|w| w.today_count()).unwrap_or(0) as i64;
+                    c != prev_today_count
                 };
-                let mut rank: Vec<(String, i64)> = key_stats.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                rank.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
-                let mut groups: HashMap<&'static str, i64> = HashMap::new();
-                for (k, v) in &key_stats {
-                    let g = views::classify_key(k);
-                    *groups.entry(g).or_insert(0) += v;
-                }
-                let group: Vec<(&'static str, i64)> = ["字母键", "数字键", "功能键", "修饰键", "编辑键", "鼠标点击", "滚轮", "其他"]
+                let heavy_elapsed_ms = last_heavy.elapsed().as_millis() as u64;
+                let heavy_interval_ms = if active { active_heavy_ms } else { idle_heavy_ms };
+                let do_heavy = forced || period_changed || heavy_elapsed_ms >= heavy_interval_ms;
+
+                // —— 慢节奏：重聚合（仅周期切换 / 超时 / 强制时执行）——
+                if do_heavy {
+                    // 先做完全部 DB 查询（不持共享锁），最后一次性写入。
+                    let (total, key_stats) = match period_val {
+                        -1 => db::get_stats_by_date(chrono::Local::now().date_naive()),
+                        0 => db::get_stats(None, None),
+                        n => db::get_stats(Some(n), None),
+                    };
+                    let mut rank: Vec<(String, i64)> =
+                        key_stats.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                    rank.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+                    rank.truncate(RANK_LIMIT);
+                    let mut groups: HashMap<&'static str, i64> = HashMap::new();
+                    for (k, v) in &key_stats {
+                        let g = views::classify_key(k);
+                        *groups.entry(g).or_insert(0) += v;
+                    }
+                    let group: Vec<(&'static str, i64)> = [
+                        "字母键",
+                        "数字键",
+                        "功能键",
+                        "修饰键",
+                        "编辑键",
+                        "鼠标点击",
+                        "滚轮",
+                        "其他",
+                    ]
                     .iter()
                     .filter_map(|g| groups.get(*g).map(|c| (*g, *c)))
                     .collect();
-                // 日均与最高单日：跟随所选周期（总计=全部历史，N天=最近N天）
-                let daily_days = match period_val {
-                    -1 => 1,     // 今日
-                    0 => 30,     // 总计：看近30天足够反映日均/峰值
-                    n if n > 0 => n,
-                    _ => 7,
-                };
-                let daily = db::get_daily_counts(daily_days, None);
-                let counts: Vec<i64> = daily.iter().map(|(_, c)| *c).collect();
-                let avg = if counts.is_empty() { 0 } else { counts.iter().sum::<i64>() / counts.len() as i64 };
-                let max_day = counts.iter().copied().max().unwrap_or(0);
-                // trend 固定近 7 天（趋势图视图）
-                let trend = db::get_daily_counts(7, None);
-                let hourly = db::queries::get_hourly_stats(None);
-                let wd = db::queries::get_weekday_stats(30);
-                let mut weekday: Vec<(i64, i64)> = wd.into_iter().collect();
-                weekday.sort_by_key(|(d, _)| *d);
+                    // 日均/最高单日跟随所选周期；趋势固定近7天；星期固定近30天。
+                    // 一次查询取覆盖所有需求的日数，按需切片，避免重复扫描。
+                    let daily_days = match period_val {
+                        -1 => 1, // 今日
+                        0 => 30, // 总计：近30天日均/峰值
+                        n if n > 0 => n,
+                        _ => 7,
+                    };
+                    let needed = daily_days.max(7).max(30);
+                    let daily_all = db::get_daily_counts(needed, None);
+                    let total_days = daily_all.len() as usize;
+                    let counts: Vec<i64> = if total_days >= daily_days as usize {
+                        daily_all[total_days - daily_days as usize..]
+                            .iter()
+                            .map(|(_, c)| *c)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let avg = if counts.is_empty() {
+                        0
+                    } else {
+                        counts.iter().sum::<i64>() / counts.len() as i64
+                    };
+                    let max_day = counts.iter().copied().max().unwrap_or(0);
+                    let trend: Vec<(String, i64)> = if total_days >= 7 {
+                        daily_all[total_days - 7..].to_vec()
+                    } else {
+                        daily_all.clone()
+                    };
+                    let trend30: Vec<(String, i64)> = if total_days >= 30 {
+                        daily_all[total_days - 30..].to_vec()
+                    } else {
+                        daily_all.clone()
+                    };
+                    let weekday_src: Vec<(String, i64)> = if total_days >= 30 {
+                        daily_all[total_days - 30..].to_vec()
+                    } else {
+                        daily_all.clone()
+                    };
+                    let wd = db::queries::aggregate_weekday(&weekday_src);
+                    let mut weekday: Vec<(i64, i64)> = wd.into_iter().collect();
+                    weekday.sort_by_key(|(d, _)| *d);
+                    let hourly = db::queries::get_hourly_stats(None);
+
+                    h_total = total;
+                    h_avg = avg;
+                    h_max = max_day;
+                    h_rank = rank;
+                    h_group = group;
+                    h_trend = trend;
+                    h_trend30 = trend30;
+                    h_hourly = hourly;
+                    h_weekday = weekday;
+                    last_heavy = Instant::now();
+                    prev_period = period_val;
+                }
+
+                // —— 快节奏：内存读取（今日活跃 / 当前速度）——
+                let today_count = db::get_today_count(db.writer().map(|w| w.as_ref()));
+                let cpm = focusflow_core::stats::cpm(config).get_cpm();
+                prev_today_count = today_count;
 
                 // 一次性加锁写入（锁持有时间极短，仅拷贝数据）
                 {
@@ -91,29 +212,18 @@ pub fn spawn_stats_worker(
                     s.today_count = today_count;
                     s.cpm = cpm;
                     s.period = period_val;
-                    s.total = total;
-                    s.avg = avg;
-                    s.max_day = max_day;
-                    s.rank = rank;
-                    s.group = group;
-                    s.trend = trend;
-                    s.hourly = hourly;
-                    s.weekday = weekday;
+                    s.total = h_total;
+                    s.avg = h_avg;
+                    s.max_day = h_max;
+                    s.rank.clone_from(&h_rank);
+                    s.group.clone_from(&h_group);
+                    s.trend.clone_from(&h_trend);
+                    s.trend30.clone_from(&h_trend30);
+                    s.hourly.clone_from(&h_hourly);
+                    s.weekday.clone_from(&h_weekday);
                 }
 
-                // 自适应频率：活跃（计数变化）时 2 秒刷新，空闲 5 秒；强制刷新信号则立即下一轮
-                let forced = refresh_now.swap(false, Ordering::Relaxed);
-                let next_sleep = if forced {
-                    0
-                } else if today_count != prev_today_count {
-                    2000
-                } else {
-                    5000
-                };
-                prev_today_count = today_count;
-                if next_sleep > 0 {
-                    std::thread::sleep(Duration::from_millis(next_sleep));
-                }
+                std::thread::sleep(Duration::from_millis(tick_ms));
             }
         })
         .expect("启动统计线程失败");
@@ -121,34 +231,104 @@ pub fn spawn_stats_worker(
 
 use std::collections::HashMap;
 
-/// Windows 系统常见中文字体候选（按优先级）。
-const CJK_FONT_CANDIDATES: &[&str] = &[
-    "C:\\Windows\\Fonts\\msyh.ttc",   // 微软雅黑
-    "C:\\Windows\\Fonts\\msyh.ttf",
-    "C:\\Windows\\Fonts\\simhei.ttf", // 黑体
-    "C:\\Windows\\Fonts\\simsun.ttc", // 宋体
-    "C:\\Windows\\Fonts\\deng.ttf",   // 等线
-];
+/// 按配置 `[gui] font` 返回中文字体候选（按优先级）。
+/// 取值：hei=黑体(默认) / yahei=微软雅黑 / song=宋体 / kai=楷体 / dengxian=等线。
+fn cjk_font_candidates() -> &'static [&'static str] {
+    let name = focusflow_core::config::instance().get_or("gui", "font", "hei");
+    match name.as_str() {
+        "yahei" | "msyh" | "y" => &[
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\msyh.ttf",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+        ],
+        "song" | "simsun" | "s" => &[
+            "C:\\Windows\\Fonts\\simsun.ttc",
+            "C:\\Windows\\Fonts\\simsunb.ttf",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+        ],
+        "kai" | "kaiti" | "k" => &[
+            "C:\\Windows\\Fonts\\simkai.ttf",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+        ],
+        "dengxian" | "deng" | "d" => &[
+            "C:\\Windows\\Fonts\\deng.ttf",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+        ],
+        _ => &[
+            "C:\\Windows\\Fonts\\simhei.ttf", // 黑体（默认，笔画粗重更醒目）
+            "C:\\Windows\\Fonts\\msyh.ttc",
+        ],
+    }
+}
 
 fn load_cjk_font_bytes() -> Option<Vec<u8>> {
-    CJK_FONT_CANDIDATES
+    cjk_font_candidates()
         .iter()
         .find(|p| std::path::Path::new(p).exists())
         .and_then(|p| std::fs::read(p).ok())
 }
 
-fn install_cjk_font(ctx: &egui::Context, font_name: &str, data: Vec<u8>) {
+/// Segoe UI 候选（Python 版主字体，中文由 CJK 字体回退）。
+const SEGOE_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\segoeui.ttf",
+    "C:\\Windows\\Fonts\\segoeui.ttc",
+];
+
+/// 加粗字体候选：Segoe UI Bold（拉丁）+ 微软雅黑 Bold（中文）。
+/// egui 的 FontId 无字重字段，`.strong()` 无法加粗，只能注册粗体字体文件。
+const BOLD_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\segoeuib.ttf",  // Segoe UI Bold
+    "C:\\Windows\\Fonts\\msyhbd.ttc",    // 微软雅黑 Bold（中文粗体）
+];
+
+/// 安装 Segoe UI（主字体）+ CJK 回退（中文），对齐 Python 版观感。
+fn install_cjk_font(ctx: &egui::Context, cjk_name: &str, cjk_data: Vec<u8>) {
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert(font_name.to_owned(), Arc::new(egui::FontData::from_owned(data)));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push(font_name.to_owned());
+
+    // 注册 CJK 回退字体（保持原始字形大小）
+    fonts.font_data.insert(
+        cjk_name.to_owned(),
+        Arc::new(egui::FontData::from_owned(cjk_data)),
+    );
+
+    // 注册 Segoe UI 主字体（存在时优先，否则纯用 CJK）
+    let segoe_name = "segoe_ui";
+    if let Some(segoe_path) = SEGOE_FONT_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+    {
+        if let Ok(data) = std::fs::read(segoe_path) {
+            fonts.font_data.insert(
+                segoe_name.to_owned(),
+                Arc::new(egui::FontData::from_owned(data)),
+            );
+        }
     }
+
+    // 家族列表：Segoe UI 在前（拉丁/数字用 Segoe UI），CJK 在后（中文回退）
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let list = fonts.families.entry(family).or_default();
+        if fonts.font_data.contains_key(segoe_name) {
+            list.push(segoe_name.to_owned());
+        }
+        list.push(cjk_name.to_owned());
+    }
+
+    // 注册"加粗"字体家族：egui 无字重字段，用粗体字体文件实现真加粗
+    let bold_family = egui::FontFamily::Name(crate::views::BOLD_FONT_FAMILY.into());
+    let bold_list = fonts.families.entry(bold_family).or_default();
+    for path in BOLD_FONT_CANDIDATES {
+        if std::path::Path::new(path).exists() {
+            if let Ok(data) = std::fs::read(path) {
+                let name = format!("bold_{}", bold_list.len());
+                fonts
+                    .font_data
+                    .insert(name.clone(), Arc::new(egui::FontData::from_owned(data)));
+                bold_list.push(name);
+            }
+        }
+    }
+
     ctx.set_fonts(fonts);
 }
 
@@ -216,6 +396,7 @@ struct TrayBridge {
     listener: Option<Arc<focusflow_core::listener::InputListener>>,
     #[allow(dead_code)]
     db: Option<Arc<focusflow_core::db::Database>>,
+    floating: Arc<FloatingWindow>,
 }
 
 impl crate::tray::TrayCallbacks for TrayBridge {
@@ -229,10 +410,12 @@ impl crate::tray::TrayCallbacks for TrayBridge {
         self.listener.as_ref().map(|l| l.is_paused()).unwrap_or(false)
     }
     fn toggle_floating(&self) {
-        tracing::debug!("切换悬浮窗（后续阶段实现）");
+        let show = !self.floating.is_visible();
+        self.floating.set_visible(show);
+        tracing::info!("悬浮窗已{}", if show { "显示" } else { "隐藏" });
     }
     fn is_floating_visible(&self) -> bool {
-        false
+        self.floating.is_visible()
     }
     fn request_quit(&self) {
         self.handle.request_quit();
@@ -282,6 +465,24 @@ pub struct FocusFlowApp {
     import_result: Option<String>,
     /// 导入线程结果槽（后台线程写入，UI 每帧轮询）
     import_result_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    /// 悬浮窗控制器
+    floating: Arc<FloatingWindow>,
+    /// 趋势图选中的天数（7/30）
+    trend_days: i64,
+    /// 排行表列宽比例（排名/键鼠/次数/占比，总和=1）
+    rank_cols: [f32; 4],
+    /// 分组表列宽比例（分组/次数/占比，总和=1）
+    group_cols: [f32; 3],
+    /// 已持久化的列宽（用于检测变化后写回配置）
+    saved_rank_cols: [f32; 4],
+    /// 已持久化的分组列宽
+    saved_group_cols: [f32; 3],
+    /// 列宽写盘节流时间戳
+    last_cols_save: std::time::Instant,
+    /// 启动即进托盘（eframe 首帧会强制显示窗口，需在启动前几帧补发隐藏）
+    start_to_tray: bool,
+    /// 已渲染帧数（用于补发隐藏）
+    frames: u32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -326,7 +527,26 @@ impl FocusFlowApp {
             plugin_inputs: HashMap::new(),
             import_result: None,
             import_result_slot: None,
+            floating: Arc::new(FloatingWindow::new(
+                Arc::clone(&shared),
+                focusflow_core::config::instance(),
+            )),
+            trend_days: 7,
+            rank_cols: load_cols("rank_cols", [0.14, 0.42, 0.22, 0.22]),
+            group_cols: load_cols("group_cols", [0.50, 0.25, 0.25]),
+            saved_rank_cols: [0.0; 4],
+            saved_group_cols: [0.0; 3],
+            last_cols_save: std::time::Instant::now(),
+            start_to_tray: focusflow_core::config::instance().get_bool("gui", "start_to_tray", true),
+            frames: 0,
         };
+        app.saved_rank_cols = app.rank_cols;
+        app.saved_group_cols = app.group_cols;
+        // 双击悬浮窗 → 打开主窗口
+        {
+            let handle = Arc::clone(&app.handle);
+            app.floating.set_open_callback(move || handle.show_window());
+        }
         // 初始化插件管理器（加载 plugins/*.lua）
         let mut pm = focusflow_core::plugins::manager::PluginManager::new(
             app.config,
@@ -340,13 +560,17 @@ impl FocusFlowApp {
         app.setup_fonts(cc);
         handle.set_ctx(cc.egui_ctx.clone());
         app.init_system();
+        // 启动时按配置显示悬浮窗
+        if app.config.get_bool("floating", "enabled", false) {
+            app.floating.set_visible(true);
+        }
         app
     }
 
     fn setup_fonts(&mut self, cc: &eframe::CreationContext<'_>) {
         if let Some(data) = load_cjk_font_bytes() {
             install_cjk_font(&cc.egui_ctx, "cjk_font", data.clone());
-            tracing::info!("已加载中文字体 ({} bytes)", data.len());
+            tracing::info!("已加载字体 (Segoe UI + CJK, {} bytes)", data.len());
             self.font_ready = true;
         } else {
             tracing::warn!("未找到系统中文字体，中文可能显示异常");
@@ -362,6 +586,7 @@ impl FocusFlowApp {
             handle: Arc::clone(&handle),
             listener: Some(listener),
             db: Some(db),
+            floating: Arc::clone(&self.floating),
         };
         let mut tray = Tray::new(Arc::new(bridge));
         if let Err(e) = tray.start() {
@@ -584,7 +809,13 @@ impl FocusFlowApp {
             guard.take()
         };
         match done {
-            Some(result) => self.import_result = Some(result),
+            Some(result) => {
+                self.import_result = Some(result);
+                // 导入完成后：导入直接写库（绕过写线程），重建今日计数缓存保持一致
+                if let Some(w) = self.db.writer() {
+                    w.recompute_today_count();
+                }
+            }
             None => self.import_result_slot = Some(slot), // 未完成，下帧再查
         }
     }
@@ -602,7 +833,7 @@ impl FocusFlowApp {
                 // 顶部导航
                 egui::Frame::new()
                     .fill(self.theme.card_bg)
-                    .corner_radius(10.0)
+                    .corner_radius(16.0)
                     .inner_margin(egui::Margin::symmetric(16, 10))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -625,7 +856,7 @@ impl FocusFlowApp {
                 };
                 egui::Frame::new()
                     .fill(self.theme.card_bg)
-                    .corner_radius(10.0)
+                    .corner_radius(16.0)
                     .inner_margin(egui::Margin::symmetric(16, 12))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -636,7 +867,7 @@ impl FocusFlowApp {
                 // 视图切换
                 egui::Frame::new()
                     .fill(self.theme.card_bg)
-                    .corner_radius(10.0)
+                    .corner_radius(16.0)
                     .inner_margin(egui::Margin::symmetric(16, 8))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -647,7 +878,7 @@ impl FocusFlowApp {
                 // 内容区
                 egui::Frame::new()
                     .fill(self.theme.card_bg)
-                    .corner_radius(10.0)
+                    .corner_radius(16.0)
                     .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -658,21 +889,21 @@ impl FocusFlowApp {
                                     total: s.total,
                                     clear_key: None,
                                 };
-                                rank.show(ui, &self.theme);
+                                rank.show(ui, &self.theme, &mut self.rank_cols);
                             }
                             View::Group => {
                                 let group = GroupView {
                                     rows: s.group.clone(),
                                     total: s.total,
                                 };
-                                group.show(ui, &self.theme);
+                                group.show(ui, &self.theme, &mut self.group_cols);
                             }
                             View::Trend => {
                                 let mut trend = TrendView {
-                                    days: 7,
-                                    data: s.trend.clone(),
+                                    days: self.trend_days,
                                 };
-                                trend.show(ui, &self.theme);
+                                trend.show(ui, &self.theme, &s.trend, &s.trend30);
+                                self.trend_days = trend.days;
                             }
                             View::Hourly => {
                                 let mut hourly = HourlyView { data: s.hourly.clone() };
@@ -821,9 +1052,21 @@ impl FocusFlowApp {
 impl eframe::App for FocusFlowApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if ctx.input(|i| i.viewport().close_requested()) && !self.handle.quitting.load(Ordering::SeqCst) {
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        let quitting = self.handle.quitting.load(Ordering::SeqCst);
+        if close_requested && !quitting {
+            // 点 X → 取消关闭，隐藏到托盘（托盘"退出程序"才会真正退出）
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.handle.hide_window();
+            ctx.request_repaint_after(Duration::from_millis(500));
             return;
+        }
+        // quitting=true（托盘"退出程序"发起）时放行真正关闭
+
+        // 启动即进托盘：eframe 首帧渲染后会强制显示窗口，这里在启动前几帧补发隐藏
+        self.frames += 1;
+        if self.start_to_tray && self.frames <= 4 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
         // 应用主题（仅在构造时 + 切换主题时调用；每帧调用会触发 egui 全量重排导致卡顿）
@@ -835,14 +1078,40 @@ impl eframe::App for FocusFlowApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .fill(self.theme.bg)
+                    .fill(self.theme.grad_bottom)
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
+                // 页面渐变背景（对齐 Python 版液态玻璃），铺满整个面板避免露黑边
+                let bg_rect = ui.max_rect().expand2(egui::vec2(16.0, 16.0));
+                views::paint_vertical_gradient(
+                    ui.painter(),
+                    bg_rect,
+                    self.theme.grad_top,
+                    self.theme.grad_bottom,
+                );
                 self.show_content(ui, &ctx);
             });
 
-        // 持续重绘（统计实时更新）
+        // 悬浮窗（需要显示时注册独立置顶视口）
+        self.floating.show(&ctx);
+
+        // 列宽变化后节流写盘，重启后保持（拖动期间最多每 2 秒写一次）
+        if (self.rank_cols != self.saved_rank_cols || self.group_cols != self.saved_group_cols)
+            && self.last_cols_save.elapsed() >= Duration::from_secs(2)
+        {
+            self.config
+                .set("gui", "rank_cols", &cols_to_string(&self.rank_cols))
+                .ok();
+            self.config
+                .set("gui", "group_cols", &cols_to_string(&self.group_cols))
+                .ok();
+            self.saved_rank_cols = self.rank_cols;
+            self.saved_group_cols = self.group_cols;
+            self.last_cols_save = std::time::Instant::now();
+        }
+
+        // 持续重绘（统计实时更新）：1 秒一次，减少常驻 GPU/CPU 开销避免卡顿
         ctx.request_repaint_after(Duration::from_millis(1000));
     }
 }

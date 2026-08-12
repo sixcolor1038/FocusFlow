@@ -19,6 +19,14 @@ pub struct Theme {
     pub accent_soft: egui::Color32,
     pub muted: egui::Color32,
     pub border: egui::Color32,
+    /// 表格表头背景
+    pub header_bg: egui::Color32,
+    /// 表格横向分隔线颜色
+    pub grid_line: egui::Color32,
+    /// 页面背景渐变（顶→底，对齐 Python 版液态玻璃）
+    pub grad_top: egui::Color32,
+    /// 页面背景渐变底
+    pub grad_bottom: egui::Color32,
     #[allow(dead_code)]
     pub success: egui::Color32,
     #[allow(dead_code)]
@@ -41,6 +49,10 @@ impl Theme {
             accent_soft: c(0xE8, 0xF0, 0xFE),
             muted: c(0x4A, 0x4A, 0x6A),
             border: c(0xE5, 0xEC, 0xF8),
+            header_bg: c(0xF1, 0xF5, 0xFB),
+            grid_line: c(0xE3, 0xEA, 0xF6),
+            grad_top: c(0xE8, 0xEF, 0xFC),
+            grad_bottom: c(0xF7, 0xFA, 0xFE),
             success: c(0x10, 0xB9, 0x81),
             warning: c(0xF5, 0x9E, 0x0B),
             danger: c(0xE5, 0x48, 0x4D),
@@ -58,6 +70,10 @@ impl Theme {
             accent_soft: c(0x22, 0x30, 0x4A),
             muted: c(0x8A, 0x92, 0xA6),
             border: c(0x2A, 0x30, 0x42),
+            header_bg: c(0x23, 0x2A, 0x3C),
+            grid_line: c(0x2E, 0x35, 0x48),
+            grad_top: c(0x17, 0x1B, 0x27),
+            grad_bottom: c(0x10, 0x13, 0x1C),
             success: c(0x34, 0xD3, 0x99),
             warning: c(0xFB, 0xBF, 0x24),
             danger: c(0xF8, 0x71, 0x71),
@@ -87,6 +103,34 @@ impl Theme {
 
 fn c(r: u8, g: u8, b: u8) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
+}
+
+/// 加粗字体家族名（在 gui.rs 安装字体时注册，包含 Segoe UI Bold + 雅黑 Bold）。
+pub const BOLD_FONT_FAMILY: &str = "ff_bold";
+
+/// 获取加粗字体家族。
+pub fn bold_family() -> egui::FontFamily {
+    egui::FontFamily::Name(BOLD_FONT_FAMILY.into())
+}
+
+/// 绘制垂直渐变背景（对齐 Python 版页面渐变）。
+pub fn paint_vertical_gradient(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    top: egui::Color32,
+    bottom: egui::Color32,
+) {
+    if rect.width() < 1.0 || rect.height() < 1.0 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// 千分位格式化。
@@ -218,12 +262,18 @@ impl StatsPanel {
         });
         ui.add_space(10.0);
 
+        // 日均口径跟随所选周期：今日 / N天 / 总计(近30天)
+        let avg_label = match self.period {
+            Period::Today => "日均(今日)".to_string(),
+            Period::Days(n) => format!("日均({n}天)"),
+            Period::Total => "日均(近30天)".to_string(),
+        };
         // 大数字卡片：用 columns 均分宽度，防止横向溢出
         let items: [(String, String); 5] = [
             ("今日活跃".to_string(), fmt_thousands(self.today_count)),
             ("当前速度".to_string(), format!("{} 次/分", fmt_thousands(self.cpm))),
             (format!("周期总数({})", self.period.label()), fmt_thousands(self.total)),
-            ("日均(7天)".to_string(), fmt_thousands(self.avg)),
+            (avg_label, fmt_thousands(self.avg)),
             ("最高单日".to_string(), fmt_thousands(self.max_day)),
         ];
         // columns 自动均分可用宽度，不会横向溢出
@@ -253,6 +303,89 @@ impl StatsPanel {
     }
 }
 
+/// 表格单元格：绘制完整网格（底部横线 + 右侧竖线）。
+fn cell_grid_lines(ui: &mut egui::Ui, theme: &Theme) {
+    let rect = ui.max_rect();
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        egui::Stroke::new(1.0, theme.grid_line),
+    );
+    ui.painter().vline(
+        rect.right(),
+        rect.y_range(),
+        egui::Stroke::new(1.0, theme.grid_line),
+    );
+}
+
+/// 表头单元格：背景填充 + 底部线 + 右侧竖线。
+fn header_cell(ui: &mut egui::Ui, theme: &Theme, text: &str) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, theme.header_bg);
+    ui.label(egui::RichText::new(text).size(14.0).strong().color(theme.fg));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        egui::Stroke::new(1.0, theme.grid_line),
+    );
+    ui.painter().vline(
+        rect.right(),
+        rect.y_range(),
+        egui::Stroke::new(1.0, theme.grid_line),
+    );
+}
+
+/// 右对齐数字单元格（次数/占比列，不带千分位）。
+fn right_number_cell(ui: &mut egui::Ui, theme: &Theme, text: &str, color: egui::Color32, strong: bool) {
+    let mut rich = egui::RichText::new(text).size(14.0).monospace().color(color);
+    if strong {
+        rich = rich.strong();
+    }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(6.0);
+        ui.label(rich);
+    });
+    cell_grid_lines(ui, theme);
+}
+
+/// 调整列宽比例：拖动第 j 列与 j+1 列之间的分隔线，保证各列总和不变，
+/// 从而表格最左与最右边缘始终固定，中间列任意拉伸也不会溢出。
+fn adjust_columns(
+    cols: &mut [f32],
+    j: usize,
+    dx: f32,
+    content_w: f32,
+    mins: &[f32],
+    maxs: &[f32],
+) {
+    let d = dx / content_w.max(1.0);
+    let mut nj = cols[j] + d;
+    let mut nj1 = cols[j + 1] - d;
+    // 依次夹紧，超出的部分转嫁给相邻列，保持总和不变
+    if nj1 < mins[j + 1] {
+        let over = mins[j + 1] - nj1;
+        nj -= over;
+        nj1 = mins[j + 1];
+    }
+    if nj < mins[j] {
+        let over = mins[j] - nj;
+        nj1 -= over;
+        nj = mins[j];
+    }
+    if nj > maxs[j] {
+        let over = nj - maxs[j];
+        nj1 += over;
+        nj = maxs[j];
+    }
+    if nj1 > maxs[j + 1] {
+        let over = nj1 - maxs[j + 1];
+        nj += over;
+        nj1 = maxs[j + 1];
+    }
+    cols[j] = nj;
+    cols[j + 1] = nj1;
+}
+
 /// 键鼠排行表。
 #[derive(Default)]
 pub struct RankView {
@@ -265,47 +398,111 @@ pub struct RankView {
 }
 
 impl RankView {
-    pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+    pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme, cols: &mut [f32; 4]) {
         use egui_extras::{Column, TableBuilder};
-        // 排行表：固定列宽（总和 < 最小窗口宽度，占比必可见），内容居中
+        if self.rows.is_empty() {
+            ui.label(
+                egui::RichText::new("暂无数据")
+                    .size(14.0)
+                    .color(theme.muted),
+            );
+            return;
+        }
+        // 列宽比例（占总内容宽度的份额，总和恒为 1）：
+        // 排名 / 键鼠 / 次数 / 占比。拖动中间分隔线时只改相邻两列，
+        // 占比吸收余量，因此最左（排名）与最右（占比右边缘）始终固定。
+        const MINS: [f32; 4] = [0.08, 0.22, 0.12, 0.10];
+        const MAXS: [f32; 4] = [0.20, 0.48, 0.28, 0.60];
+        let avail = ui.available_width().max(320.0);
+        let spacing = ui.spacing().item_spacing.x;
+        let content_w = avail - spacing * 3.0;
+        for i in 0..4 {
+            cols[i] = cols[i].clamp(MINS[i], MAXS[i]);
+        }
+        let sum: f32 = cols.iter().sum();
+        let n = [cols[0] / sum, cols[1] / sum, cols[2] / sum, cols[3] / sum];
+        let widths = [
+            content_w * n[0],
+            content_w * n[1],
+            content_w * n[2],
+            (avail - content_w * (n[0] + n[1] + n[2]) - spacing * 3.0).max(40.0),
+        ];
+        let table_left = ui.cursor().min.x;
+        let table_top = ui.cursor().min.y;
+        const HEADER_H: f32 = 26.0;
+
         TableBuilder::new(ui)
             .striped(true)
             .resizable(false)
             .cell_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight))
-            .column(Column::exact(70.0))
-            .column(Column::exact(220.0))
-            .column(Column::exact(110.0))
-            .column(Column::exact(110.0))
-            .header(26.0, |mut header| {
-                header.col(|ui| { ui.strong(egui::RichText::new("排名").size(14.0)); });
-                header.col(|ui| { ui.strong(egui::RichText::new("键鼠").size(14.0)); });
-                header.col(|ui| { ui.strong(egui::RichText::new("次数").size(14.0)); });
-                header.col(|ui| { ui.strong(egui::RichText::new("占比").size(14.0)); });
+            .column(Column::exact(widths[0]))
+            .column(Column::exact(widths[1]))
+            .column(Column::exact(widths[2]))
+            .column(Column::exact(widths[3]))
+            .header(HEADER_H, |mut header| {
+                header.col(|ui| header_cell(ui, theme, "排名"));
+                header.col(|ui| header_cell(ui, theme, "键鼠"));
+                header.col(|ui| header_cell(ui, theme, "次数"));
+                header.col(|ui| header_cell(ui, theme, "占比"));
             })
             .body(|mut body| {
                 for (rank, (key, count)) in self.rows.iter().enumerate() {
                     let rank = rank + 1;
-                    body.row(30.0, |mut row| {
+                    body.row(32.0, |mut row| {
                         row.col(|ui| {
-                            ui.label(egui::RichText::new(rank.to_string()).size(14.0).color(theme.muted));
+                            ui.label(
+                                egui::RichText::new(rank.to_string()).size(14.0).color(theme.muted),
+                            );
+                            cell_grid_lines(ui, theme);
                         });
                         row.col(|ui| {
                             ui.label(egui::RichText::new(key.as_str()).size(15.0).strong());
+                            cell_grid_lines(ui, theme);
                         });
                         row.col(|ui| {
-                            ui.label(egui::RichText::new(fmt_thousands(*count)).size(15.0).monospace());
+                            right_number_cell(ui, theme, &count.to_string(), theme.fg, true);
                         });
                         row.col(|ui| {
+                            // 占比居中
                             let percent = if self.total > 0 {
                                 format!("{:.2}%", (*count as f64 / self.total as f64) * 100.0)
                             } else {
                                 "0.00%".to_string()
                             };
-                            ui.label(egui::RichText::new(percent).size(14.0).color(theme.muted));
+                            ui.label(
+                                egui::RichText::new(percent).size(14.0).monospace().color(theme.muted),
+                            );
+                            cell_grid_lines(ui, theme);
                         });
                     });
                 }
             });
+
+        // 自定义拖动把手：位于各列分隔处（表头高度范围），调整相邻列比例
+        for j in 0..3 {
+            let x = table_left + (0..=j).map(|i| widths[i] + spacing).sum::<f32>();
+            let handle = egui::Rect::from_min_max(
+                egui::pos2(x - 4.0, table_top),
+                egui::pos2(x + 4.0, table_top + HEADER_H),
+            );
+            let resp = ui.interact(
+                handle,
+                ui.id().with("rank-resize").with(j),
+                egui::Sense::drag(),
+            );
+            if resp.dragged() {
+                let dx = resp.drag_delta().x;
+                adjust_columns(cols, j, dx, content_w, &MINS, &MAXS);
+            }
+            if resp.dragged() || resp.hovered() {
+                ui.painter().vline(
+                    x,
+                    table_top..=(table_top + HEADER_H),
+                    egui::Stroke::new(2.0, theme.accent),
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+            }
+        }
     }
 }
 
@@ -318,59 +515,122 @@ pub struct GroupView {
 
 
 impl GroupView {
-    pub fn show(&self, ui: &mut egui::Ui, theme: &Theme) {
+    pub fn show(&self, ui: &mut egui::Ui, theme: &Theme, cols: &mut [f32; 3]) {
         use egui_extras::{Column, TableBuilder};
-        // 分组表：固定列宽，内容居中
+        if self.rows.is_empty() {
+            ui.label(
+                egui::RichText::new("暂无数据")
+                    .size(14.0)
+                    .color(theme.muted),
+            );
+            return;
+        }
+        // 列宽比例：分组 / 次数 / 占比（总和恒为 1，最左最右固定）
+        const MINS: [f32; 3] = [0.30, 0.15, 0.12];
+        const MAXS: [f32; 3] = [0.62, 0.36, 0.60];
+        let avail = ui.available_width().max(320.0);
+        let spacing = ui.spacing().item_spacing.x;
+        let content_w = avail - spacing * 2.0;
+        for i in 0..3 {
+            cols[i] = cols[i].clamp(MINS[i], MAXS[i]);
+        }
+        let sum: f32 = cols.iter().sum();
+        let n = [cols[0] / sum, cols[1] / sum, cols[2] / sum];
+        let widths = [
+            content_w * n[0],
+            content_w * n[1],
+            (avail - content_w * (n[0] + n[1]) - spacing * 2.0).max(40.0),
+        ];
+        let table_left = ui.cursor().min.x;
+        let table_top = ui.cursor().min.y;
+        const HEADER_H: f32 = 26.0;
+
         TableBuilder::new(ui)
             .striped(true)
             .resizable(false)
             .cell_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight))
-            .column(Column::exact(220.0))
-            .column(Column::exact(130.0))
-            .column(Column::exact(130.0))
-            .header(26.0, |mut header| {
-                header.col(|ui| { ui.strong(egui::RichText::new("分组").size(14.0)); });
-                header.col(|ui| { ui.strong(egui::RichText::new("次数").size(14.0)); });
-                header.col(|ui| { ui.strong(egui::RichText::new("占比").size(14.0)); });
+            .column(Column::exact(widths[0]))
+            .column(Column::exact(widths[1]))
+            .column(Column::exact(widths[2]))
+            .header(HEADER_H, |mut header| {
+                header.col(|ui| header_cell(ui, theme, "分组"));
+                header.col(|ui| header_cell(ui, theme, "次数"));
+                header.col(|ui| header_cell(ui, theme, "占比"));
             })
             .body(|mut body| {
                 for (g, count) in &self.rows {
-                    body.row(30.0, |mut row| {
+                    body.row(32.0, |mut row| {
                         row.col(|ui| {
                             ui.label(egui::RichText::new(*g).size(15.0).strong());
+                            cell_grid_lines(ui, theme);
                         });
                         row.col(|ui| {
-                            ui.label(egui::RichText::new(fmt_thousands(*count)).size(15.0).monospace());
+                            right_number_cell(ui, theme, &count.to_string(), theme.fg, true);
                         });
                         row.col(|ui| {
+                            // 占比居中
                             let percent = if self.total > 0 {
                                 format!("{:.2}%", (*count as f64 / self.total as f64) * 100.0)
                             } else {
                                 "0.00%".to_string()
                             };
-                            ui.label(egui::RichText::new(percent).size(14.0).color(theme.muted));
+                            ui.label(
+                                egui::RichText::new(percent).size(14.0).monospace().color(theme.muted),
+                            );
+                            cell_grid_lines(ui, theme);
                         });
                     });
                 }
             });
+
+        // 自定义拖动把手：调整相邻列比例（占比吸收余量，边缘固定）
+        for j in 0..2 {
+            let x = table_left + (0..=j).map(|i| widths[i] + spacing).sum::<f32>();
+            let handle = egui::Rect::from_min_max(
+                egui::pos2(x - 4.0, table_top),
+                egui::pos2(x + 4.0, table_top + HEADER_H),
+            );
+            let resp = ui.interact(
+                handle,
+                ui.id().with("group-resize").with(j),
+                egui::Sense::drag(),
+            );
+            if resp.dragged() {
+                let dx = resp.drag_delta().x;
+                adjust_columns(cols, j, dx, content_w, &MINS, &MAXS);
+            }
+            if resp.dragged() || resp.hovered() {
+                ui.painter().vline(
+                    x,
+                    table_top..=(table_top + HEADER_H),
+                    egui::Stroke::new(2.0, theme.accent),
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+            }
+        }
     }
 }
 
 /// 趋势图（近7/30天每日活跃）。
 pub struct TrendView {
-    /// 近 N 天数据
+    /// 当前选中的天数（由外部维护，切换后持久保留）
     pub days: i64,
-    pub data: Vec<(String, i64)>,
 }
 
 impl Default for TrendView {
     fn default() -> Self {
-        Self { days: 7, data: Vec::new() }
+        Self { days: 7 }
     }
 }
 
 impl TrendView {
-    pub fn show(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        data_7: &[(String, i64)],
+        data_30: &[(String, i64)],
+    ) {
         ui.horizontal(|ui| {
             for (label, days) in [("近7天", 7i64), ("近30天", 30i64)] {
                 if ui.selectable_label(self.days == days, label).clicked() {
@@ -379,7 +639,8 @@ impl TrendView {
             }
         });
         ui.add_space(8.0);
-        draw_line_chart(ui, theme, "每日活跃趋势", &self.data);
+        let data = if self.days == 30 { data_30 } else { data_7 };
+        draw_line_chart(ui, theme, "每日活跃趋势", data);
     }
 }
 

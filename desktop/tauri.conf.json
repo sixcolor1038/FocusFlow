@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FocusFlow",
+  "version": "0.1.0",
+  "identifier": "com.focusflow.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "FocusFlow - 效率追踪器",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 820,
+        "minHeight": 560,
+        "resizable": true,
+        "visible": false,
+        "url": "index.html"
+      },
+      {
+        "label": "floating",
+        "title": "FocusFlow 悬浮窗",
+        "width": 84,
+        "height": 46,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": true,
+        "visible": false,
+        "url": "floating.html"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "publisher": "FocusFlow",
+    "shortDescription": "FocusFlow - 效率与专注力分析工具",
+    "longDescription": "FocusFlow 键鼠活跃度统计与效率分析工具：实时追踪键盘鼠标活动、趋势分析、番茄钟与护眼提醒。"
+  }
+}

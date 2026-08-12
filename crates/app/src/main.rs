@@ -7,6 +7,7 @@
 // 注意：focusflow-cli 保持 console 子系统（需要命令行输出）。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod floating;
 mod gui;
 mod hotkey;
 mod single_instance;
@@ -73,6 +74,10 @@ fn main() -> anyhow::Result<()> {
         .with_min_inner_size([820.0, 560.0]);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
+    }
+    // 启动即进托盘（不显示主界面），通过托盘/热键呼出
+    if config.get_bool("gui", "start_to_tray", true) {
+        viewport = viewport.with_visible(false);
     }
     let options = eframe::NativeOptions {
         viewport,

@@ -49,7 +49,8 @@ pub fn default_config() -> HashMap<String, HashMap<String, String>> {
         ("theme", "light"),
         ("show_trend_chart", "true"),
         ("show_key_groups", "true"),
-        ("start_to_tray", "false"),
+        ("start_to_tray", "true"),
+        ("font", "hei"),
     ]);
     s("hotkey", &[
         ("enabled", "false"),

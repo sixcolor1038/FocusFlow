@@ -46,12 +46,17 @@ fn open_edge_history() -> (Option<Connection>, Option<PathBuf>) {
     if !path.exists() {
         return (None, None);
     }
-    // 1) 只读直连（Edge 未运行或允许读时最快，不复制）
+    // 1) 只读直连：rusqlite 打开不一定失败（锁在首个查询才报 SQLITE_BUSY），
+    //    必须实际验证查询可用才采用，否则 Edge 运行时直连会静默返回 0。
     if let Ok(conn) = Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
-        return (Some(conn), None);
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(200));
+        if conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).is_ok() {
+            return (Some(conn), None);
+        }
+        drop(conn);
     }
     // 2) 复制兜底：先检查大小，超大库跳过复制避免卡顿
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -71,9 +76,11 @@ fn open_edge_history() -> (Option<Connection>, Option<PathBuf>) {
             }
         }
         if let Ok(conn) = Connection::open(&temp) {
+            tracing::debug!("Edge 历史库被锁定，已用副本查询");
             return (Some(conn), Some(temp));
         }
     }
+    tracing::warn!("Edge 历史库无法读取（直连被锁且复制失败）");
     (None, None)
 }
 

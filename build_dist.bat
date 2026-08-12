@@ -13,7 +13,7 @@ echo [1/3] Building release...
 cargo build --release -p focusflow-app || goto :err
 
 echo [2/3] Assembling dist folder...
-set DIST=E:\mydata\DeepSeekdata\code\FocusFlow-rs\dist\FocusFlow
+set DIST=E:\mydata\DeepSeekdata\code\FocusFlow\dist\FocusFlow
 if exist "%DIST%" rmdir /s /q "%DIST%"
 mkdir "%DIST%"
 mkdir "%DIST%\plugins"

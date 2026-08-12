@@ -148,6 +148,25 @@ impl DbWriter {
         self.state.today_count.store(0, Ordering::Relaxed);
     }
 
+    /// 重新统计今日计数（导入/外部写入数据后调用，避免缓存与库不一致）。
+    pub fn recompute_today_count(&self) {
+        self.state.today_key.store(current_day_key(), Ordering::Relaxed);
+        let start = crate::db::queries::today_start_ts();
+        let count = connection::open_ro(&paths::current_year_db_path())
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2",
+                    rusqlite::params![start, start + 86_400],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+            .max(0) as u64;
+        self.state.today_count.store(count, Ordering::Relaxed);
+    }
+
     /// 立即 flush：发信号让写线程排空队列。`wait=true` 时阻塞等待完成。
     pub fn flush(&self, wait: bool) {
         if wait {
