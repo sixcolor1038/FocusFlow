@@ -44,10 +44,10 @@ pub fn init_logging() {
     // 日志目录
     std::fs::create_dir_all(crate::paths::log_dir()).ok();
 
-    // 文件 appender：5MB × 3 备份，UTF-8
+    // 文件 appender：按天滚动，保留最近 4 个文件（避免单文件无限增长）
     let file_appender = tracing_appender::rolling::Builder::new()
         .max_log_files(4)
-        .rotation(tracing_appender::rolling::Rotation::NEVER)
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
         .build(crate::paths::log_dir())
         .expect("创建日志 appender 失败");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);

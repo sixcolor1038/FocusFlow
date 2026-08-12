@@ -53,135 +53,170 @@ fn is_function_key(key: &Key) -> bool {
 }
 
 /// 特殊键映射表（rdev Key -> 中文显示名），对应 Python 版 `_SPECIAL_KEY_MAP`。
-fn key_display_name(key: &Key) -> String {
+fn key_display_name(key: &Key) -> &'static str {
     match key {
-        Key::Space => "空格".to_string(),
-        Key::Return => "回车".to_string(),
-        Key::Backspace => "退格".to_string(),
-        Key::Tab => "Tab".to_string(),
-        Key::ShiftLeft => "左Shift".to_string(),
-        Key::ShiftRight => "右Shift".to_string(),
-        Key::ControlLeft => "左Ctrl".to_string(),
-        Key::ControlRight => "右Ctrl".to_string(),
-        Key::Alt => "左Alt".to_string(),
-        Key::AltGr => "AltGr".to_string(),
-        Key::MetaLeft => "左Win".to_string(),
-        Key::MetaRight => "右Win".to_string(),
-        Key::CapsLock => "CapsLock".to_string(),
-        Key::Escape => "Esc".to_string(),
-        Key::Delete => "Delete".to_string(),
-        Key::Home => "Home".to_string(),
-        Key::End => "End".to_string(),
-        Key::PageUp => "PageUp".to_string(),
-        Key::PageDown => "PageDown".to_string(),
-        Key::Insert => "Insert".to_string(),
-        Key::NumLock => "NumLock".to_string(),
-        Key::ScrollLock => "ScrollLock".to_string(),
-        Key::PrintScreen => "PrintScreen".to_string(),
-        Key::Pause => "Pause".to_string(),
-        Key::UpArrow => "↑".to_string(),
-        Key::DownArrow => "↓".to_string(),
-        Key::LeftArrow => "←".to_string(),
-        Key::RightArrow => "→".to_string(),
-        Key::F1 => "F1".to_string(),
-        Key::F2 => "F2".to_string(),
-        Key::F3 => "F3".to_string(),
-        Key::F4 => "F4".to_string(),
-        Key::F5 => "F5".to_string(),
-        Key::F6 => "F6".to_string(),
-        Key::F7 => "F7".to_string(),
-        Key::F8 => "F8".to_string(),
-        Key::F9 => "F9".to_string(),
-        Key::F10 => "F10".to_string(),
-        Key::F11 => "F11".to_string(),
-        Key::F12 => "F12".to_string(),
-        _ => format!("{:?}", key),
+        Key::Space => "空格",
+        Key::Return => "回车",
+        Key::Backspace => "退格",
+        Key::Tab => "Tab",
+        Key::ShiftLeft => "左Shift",
+        Key::ShiftRight => "右Shift",
+        Key::ControlLeft => "左Ctrl",
+        Key::ControlRight => "右Ctrl",
+        Key::Alt => "左Alt",
+        Key::AltGr => "AltGr",
+        Key::MetaLeft => "左Win",
+        Key::MetaRight => "右Win",
+        Key::CapsLock => "CapsLock",
+        Key::Escape => "Esc",
+        Key::Delete => "Delete",
+        Key::Home => "Home",
+        Key::End => "End",
+        Key::PageUp => "PageUp",
+        Key::PageDown => "PageDown",
+        Key::Insert => "Insert",
+        Key::NumLock => "NumLock",
+        Key::ScrollLock => "ScrollLock",
+        Key::PrintScreen => "PrintScreen",
+        Key::Pause => "Pause",
+        Key::UpArrow => "↑",
+        Key::DownArrow => "↓",
+        Key::LeftArrow => "←",
+        Key::RightArrow => "→",
+        Key::F1 => "F1",
+        Key::F2 => "F2",
+        Key::F3 => "F3",
+        Key::F4 => "F4",
+        Key::F5 => "F5",
+        Key::F6 => "F6",
+        Key::F7 => "F7",
+        Key::F8 => "F8",
+        Key::F9 => "F9",
+        Key::F10 => "F10",
+        Key::F11 => "F11",
+        Key::F12 => "F12",
+        // Unknown 键：无静态名，调用方用 Debug 格式
+        Key::Unknown(_) => "Unknown",
+        _ => "Unknown",
     }
 }
 
-/// 字母键映射：rdev `KeyA`..`KeyZ` -> "A".."Z"
-fn letter_name(key: &Key) -> Option<String> {
-    let variant = format!("{:?}", key);
-    if let Some(ch) = variant.strip_prefix("Key") {
-        if ch.len() == 1 && ch.chars().next().unwrap().is_ascii_alphabetic() {
-            return Some(ch.to_ascii_uppercase());
-        }
-    }
-    None
-}
-
-/// 数字键映射：`Num0`..`Num9` -> "0".."9"
-fn digit_name(key: &Key) -> Option<String> {
-    let variant = format!("{:?}", key);
-    if let Some(d) = variant.strip_prefix("Num") {
-        if d.len() == 1 && d.chars().next().unwrap().is_ascii_digit() {
-            return Some(d.to_string());
-        }
-    }
-    None
-}
-
-/// 其他符号键映射
-fn symbol_name(key: &Key) -> Option<String> {
-    Some(match key {
-        Key::BackQuote => "`".to_string(),
-        Key::Minus => "-".to_string(),
-        Key::Equal => "=".to_string(),
-        Key::LeftBracket => "[".to_string(),
-        Key::RightBracket => "]".to_string(),
-        Key::SemiColon => ";".to_string(),
-        Key::Quote => "'".to_string(),
-        Key::BackSlash => "\\".to_string(),
-        Key::IntlBackslash => "\\".to_string(),
-        Key::Comma => ",".to_string(),
-        Key::Dot => ".".to_string(),
-        Key::Slash => "/".to_string(),
-        _ => return None,
-    })
-}
-
-/// 小键盘键映射
-fn kp_name(key: &Key) -> Option<String> {
-    Some(match key {
-        Key::Kp0 => "数字键盘0".to_string(),
-        Key::Kp1 => "数字键盘1".to_string(),
-        Key::Kp2 => "数字键盘2".to_string(),
-        Key::Kp3 => "数字键盘3".to_string(),
-        Key::Kp4 => "数字键盘4".to_string(),
-        Key::Kp5 => "数字键盘5".to_string(),
-        Key::Kp6 => "数字键盘6".to_string(),
-        Key::Kp7 => "数字键盘7".to_string(),
-        Key::Kp8 => "数字键盘8".to_string(),
-        Key::Kp9 => "数字键盘9".to_string(),
-        Key::KpReturn => "数字键盘回车".to_string(),
-        Key::KpMinus => "数字键盘-".to_string(),
-        Key::KpPlus => "数字键盘+".to_string(),
-        Key::KpMultiply => "数字键盘*".to_string(),
-        Key::KpDivide => "数字键盘/".to_string(),
-        Key::KpDelete => "Delete".to_string(),
-        _ => return None,
-    })
-}
-
-/// 规范化键盘按键名：rdev Key -> 中文显示名（对应 `normalize_key`）。
-///
-/// 注意：rdev 不提供布局层字符（只给物理键码），因此没有 pynput 的 char
-/// 属性与 Ctrl 控制字符问题。组合键拆分（Ctrl+D = 左Ctrl + D 各 1 次）
-/// 由物理键天然保证——每个 KeyPress 对应一个物理键。
+/// 处理热路径：按键名（优先零分配静态串，未知键才分配）。
 pub fn normalize_key(key: &Key) -> String {
     if let Some(n) = letter_name(key) {
-        return n;
+        return n.to_string();
     }
     if let Some(n) = digit_name(key) {
-        return n;
+        return n.to_string();
     }
     if let Some(n) = symbol_name(key) {
-        return n;
+        return n.to_string();
     }
     if let Some(n) = kp_name(key) {
-        return n;
+        return n.to_string();
     }
-    key_display_name(key)
+    let name = key_display_name(key);
+    if name == "Unknown" {
+        format!("{:?}", key)
+    } else {
+        name.to_string()
+    }
+}
+
+/// 字母键映射：rdev `KeyA`..`KeyZ` -> "A".."Z"（零分配）
+fn letter_name(key: &Key) -> Option<&'static str> {
+    use Key::*;
+    Some(match key {
+        KeyA => "A",
+        KeyB => "B",
+        KeyC => "C",
+        KeyD => "D",
+        KeyE => "E",
+        KeyF => "F",
+        KeyG => "G",
+        KeyH => "H",
+        KeyI => "I",
+        KeyJ => "J",
+        KeyK => "K",
+        KeyL => "L",
+        KeyM => "M",
+        KeyN => "N",
+        KeyO => "O",
+        KeyP => "P",
+        KeyQ => "Q",
+        KeyR => "R",
+        KeyS => "S",
+        KeyT => "T",
+        KeyU => "U",
+        KeyV => "V",
+        KeyW => "W",
+        KeyX => "X",
+        KeyY => "Y",
+        KeyZ => "Z",
+        _ => return None,
+    })
+}
+
+/// 数字键映射：`Num0`..`Num9` -> "0".."9"（零分配）
+fn digit_name(key: &Key) -> Option<&'static str> {
+    use Key::*;
+    Some(match key {
+        Num0 => "0",
+        Num1 => "1",
+        Num2 => "2",
+        Num3 => "3",
+        Num4 => "4",
+        Num5 => "5",
+        Num6 => "6",
+        Num7 => "7",
+        Num8 => "8",
+        Num9 => "9",
+        _ => return None,
+    })
+}
+
+/// 其他符号键映射（零分配）
+fn symbol_name(key: &Key) -> Option<&'static str> {
+    use Key::*;
+    Some(match key {
+        BackQuote => "`",
+        Minus => "-",
+        Equal => "=",
+        LeftBracket => "[",
+        RightBracket => "]",
+        SemiColon => ";",
+        Quote => "'",
+        BackSlash => "\\",
+        IntlBackslash => "\\",
+        Comma => ",",
+        Dot => ".",
+        Slash => "/",
+        _ => return None,
+    })
+}
+
+/// 小键盘键映射（零分配）
+fn kp_name(key: &Key) -> Option<&'static str> {
+    use Key::*;
+    Some(match key {
+        Kp0 => "数字键盘0",
+        Kp1 => "数字键盘1",
+        Kp2 => "数字键盘2",
+        Kp3 => "数字键盘3",
+        Kp4 => "数字键盘4",
+        Kp5 => "数字键盘5",
+        Kp6 => "数字键盘6",
+        Kp7 => "数字键盘7",
+        Kp8 => "数字键盘8",
+        Kp9 => "数字键盘9",
+        KpReturn => "数字键盘回车",
+        KpMinus => "数字键盘-",
+        KpPlus => "数字键盘+",
+        KpMultiply => "数字键盘*",
+        KpDivide => "数字键盘/",
+        KpDelete => "Delete",
+        _ => return None,
+    })
 }
 
 /// 鼠标按键名映射（对应 `_MOUSE_BUTTON_MAP`）。

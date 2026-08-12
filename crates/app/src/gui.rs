@@ -41,6 +41,7 @@ pub fn spawn_stats_worker(
     std::thread::Builder::new()
         .name("stats-worker".into())
         .spawn(move || {
+            let mut prev_today_count: i64 = -1;
             loop {
                 let period_val = period.load(Ordering::Relaxed);
 
@@ -91,7 +92,14 @@ pub fn spawn_stats_worker(
                     s.weekday = weekday;
                 }
 
-                std::thread::sleep(Duration::from_millis(2000));
+                // 自适应频率：活跃（计数变化）时 2 秒刷新保持实时，空闲时 5 秒省 CPU
+                let next_sleep = if today_count != prev_today_count {
+                    2000
+                } else {
+                    5000
+                };
+                prev_today_count = today_count;
+                std::thread::sleep(Duration::from_millis(next_sleep));
             }
         })
         .expect("启动统计线程失败");
