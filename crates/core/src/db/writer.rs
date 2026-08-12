@@ -13,11 +13,19 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use chrono::Datelike;
+
 use crate::db::connection;
 use crate::paths;
 
 /// 队列容量上限（与 Python 版 max_queue=5000 一致）
 const MAX_QUEUE: usize = 5000;
+
+/// 当前日期键（YYYYMMDD），用于跨天判断。
+fn current_day_key() -> u64 {
+    let now = chrono::Local::now();
+    now.year() as u64 * 10000 + now.month() as u64 * 100 + now.day() as u64
+}
 
 /// 写事件：键名 + 时间戳（Unix 秒）
 pub type KeyEvent = (String, i64);
@@ -37,6 +45,8 @@ struct WriterState {
     sig_tx: mpsc::Sender<Signal>,
     /// 今日计数（内存缓存）
     today_count: AtomicU64,
+    /// 今日日期键（YYYYMMDD），用于跨天重置
+    today_key: AtomicU64,
     /// 已确认建表的年份
     db_year: Mutex<i32>,
     /// 线程是否存活
@@ -76,6 +86,7 @@ impl DbWriter {
             tx,
             sig_tx,
             today_count: AtomicU64::new(today_base_count),
+            today_key: AtomicU64::new(current_day_key()),
             db_year: Mutex::new(paths::current_year()),
             alive: AtomicBool::new(true),
         });
@@ -104,10 +115,19 @@ impl DbWriter {
     ///
     /// 队列满时丢弃当前事件（记录 debug 日志）。由于写线程每 200ms 排空
     /// 一次，正常负载下队列不会满；极端磁盘阻塞时才触发丢弃，避免无限增长。
+    /// 仅成功入队的事件计入今日计数（丢弃不计数，保证计数准确）。
     pub fn record(&self, key_name: &str, timestamp: i64) {
         let state = &*self.state;
+        // 跨天检查：日期变化则重置今日计数（避免次日显示累计值）
+        let day = current_day_key();
+        if state.today_key.load(Ordering::Relaxed) != day {
+            state.today_key.store(day, Ordering::Relaxed);
+            state.today_count.store(0, Ordering::Relaxed);
+        }
         match state.tx.try_send((key_name.to_string(), timestamp)) {
-            Ok(()) => {}
+            Ok(()) => {
+                state.today_count.fetch_add(1, Ordering::Relaxed);
+            }
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::debug!("写入队列已满，丢弃事件: {key_name}");
             }
@@ -115,7 +135,6 @@ impl DbWriter {
                 tracing::debug!("写入线程未运行，丢弃事件");
             }
         }
-        state.today_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 今日计数（内存缓存值）。
@@ -165,7 +184,24 @@ fn writer_loop(
     let mut last_flush = Instant::now();
 
     loop {
-        // 处理所有待处理的信号（一次循环内尽量处理完）
+        // 阻塞等待事件或信号（100ms 超时保证定时 flush 检查）。
+        // 取到的第一条事件必须计入 batch。
+        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
+            batch.push(ev);
+        }
+        // 排空事件队列到批量缓存（可能更多）
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok(ev) => batch.push(ev),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        // 处理信号（在排空事件后，保证 flush 能带走最新事件）
         let mut flush_requested = false;
         let mut pending_done: Vec<mpsc::Sender<()>> = Vec::new();
         loop {
@@ -191,19 +227,6 @@ fn writer_loop(
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-
-        // 排空事件队列到批量缓存
-        let mut disconnected = false;
-        loop {
-            match rx.try_recv() {
-                Ok(ev) => batch.push(ev),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
             }
         }
 
@@ -237,9 +260,9 @@ fn writer_loop(
             state.alive.store(false, Ordering::Relaxed);
             return;
         }
-
+        // recv_timeout 已处理等待；无事件且无待写时，短暂让出避免空转
         if batch.is_empty() && !flush_requested {
-            thread::sleep(Duration::from_millis(200));
+            std::thread::yield_now();
         }
     }
 }
@@ -271,12 +294,14 @@ fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
             let conn = connection::open_rw(&path)?;
             conn.execute("BEGIN IMMEDIATE;", [])?;
             let insert = || -> anyhow::Result<()> {
+                // prepare 一次 + 循环绑定执行（rusqlite 标准批量方式）
                 let mut stmt = conn.prepare("INSERT INTO key_log (key_name, timestamp) VALUES (?1, ?2)")?;
                 for (key, ts) in batch {
                     stmt.execute(rusqlite::params![key, ts])?;
                 }
                 Ok(())
-            };            match insert() {
+            };
+            match insert() {
                 Ok(()) => {
                     conn.execute("COMMIT;", [])?;
                     Ok(())
