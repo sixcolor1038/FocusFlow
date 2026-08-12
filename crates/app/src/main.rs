@@ -3,6 +3,10 @@
 //! P2：系统集成——单实例、托盘、全局热键、优雅退出。
 //! 主窗口仍为 eframe/egui（P3 完善界面）。
 
+// 标记为 Windows GUI 子系统：双击运行时不再弹出 cmd 黑窗口。
+// 注意：focusflow-cli 保持 console 子系统（需要命令行输出）。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod gui;
 mod hotkey;
 mod single_instance;
