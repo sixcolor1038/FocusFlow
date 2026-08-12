@@ -37,19 +37,31 @@ fn datetime_to_chrome(dt: &chrono::DateTime<Local>) -> i64 {
 }
 
 /// 打开 Edge History（只读优先，锁定则复制）。
+/// 复制前大小保护阈值：Edge 历史库超过该大小（字节）时不再复制
+/// （复制几百 MB 会卡顿，直接返回错误提示）。
+const EDGE_COPY_MAX_BYTES: u64 = 100 * 1024 * 1024; // 100MB
+
 fn open_edge_history() -> (Option<Connection>, Option<PathBuf>) {
     let path = edge_history_path();
     if !path.exists() {
         return (None, None);
     }
-    // 1) 只读直连
+    // 1) 只读直连（Edge 未运行或允许读时最快，不复制）
     if let Ok(conn) = Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
         return (Some(conn), None);
     }
-    // 2) 复制主库 + WAL + SHM
+    // 2) 复制兜底：先检查大小，超大库跳过复制避免卡顿
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if size > EDGE_COPY_MAX_BYTES {
+        tracing::warn!(
+            "Edge 历史库过大（{}MB），跳过复制（只读直连被锁定）",
+            size / (1024 * 1024)
+        );
+        return (None, None);
+    }
     let temp = paths::data_dir().join("_edge_history_temp.db");
     if std::fs::copy(&path, &temp).is_ok() {
         for suffix in ["-wal", "-shm"] {
