@@ -32,11 +32,13 @@ pub struct SharedStats {
 }
 
 /// 后台统计线程：每 2 秒查询一次 DB，写入共享数据。
+/// `refresh_now` 置 true 时立即刷新（周期切换即时响应）。
 pub fn spawn_stats_worker(
     db: Arc<focusflow_core::db::Database>,
     config: &'static FocusFlowConfig,
     shared: Arc<Mutex<SharedStats>>,
     period: Arc<AtomicI64>,
+    refresh_now: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
         .name("stats-worker".into())
@@ -65,12 +67,19 @@ pub fn spawn_stats_worker(
                     .iter()
                     .filter_map(|g| groups.get(*g).map(|c| (*g, *c)))
                     .collect();
-                let daily = db::get_daily_counts(7, None);
+                // 日均与最高单日：跟随所选周期（总计=全部历史，N天=最近N天）
+                let daily_days = match period_val {
+                    -1 => 1,     // 今日
+                    0 => 30,     // 总计：看近30天足够反映日均/峰值
+                    n if n > 0 => n,
+                    _ => 7,
+                };
+                let daily = db::get_daily_counts(daily_days, None);
                 let counts: Vec<i64> = daily.iter().map(|(_, c)| *c).collect();
                 let avg = if counts.is_empty() { 0 } else { counts.iter().sum::<i64>() / counts.len() as i64 };
                 let max_day = counts.iter().copied().max().unwrap_or(0);
-                // trend 复用 daily 查询结果（同一 7 天数据）
-                let trend = daily;
+                // trend 固定近 7 天（趋势图视图）
+                let trend = db::get_daily_counts(7, None);
                 let hourly = db::queries::get_hourly_stats(None);
                 let wd = db::queries::get_weekday_stats(30);
                 let mut weekday: Vec<(i64, i64)> = wd.into_iter().collect();
@@ -92,14 +101,19 @@ pub fn spawn_stats_worker(
                     s.weekday = weekday;
                 }
 
-                // 自适应频率：活跃（计数变化）时 2 秒刷新保持实时，空闲时 5 秒省 CPU
-                let next_sleep = if today_count != prev_today_count {
+                // 自适应频率：活跃（计数变化）时 2 秒刷新，空闲 5 秒；强制刷新信号则立即下一轮
+                let forced = refresh_now.swap(false, Ordering::Relaxed);
+                let next_sleep = if forced {
+                    0
+                } else if today_count != prev_today_count {
                     2000
                 } else {
                     5000
                 };
                 prev_today_count = today_count;
-                std::thread::sleep(Duration::from_millis(next_sleep));
+                if next_sleep > 0 {
+                    std::thread::sleep(Duration::from_millis(next_sleep));
+                }
             }
         })
         .expect("启动统计线程失败");
@@ -249,17 +263,25 @@ pub struct FocusFlowApp {
     // 视图状态
     theme: Theme,
     dark: bool,
+    /// 主题是否已应用到 egui（避免每帧 set_visuals 触发重排）
+    theme_applied: bool,
     current_view: View,
     /// 后台线程共享统计数据
     shared: Arc<Mutex<SharedStats>>,
     /// 当前周期（后台线程读取）
     period: Arc<AtomicI64>,
+    /// 强制刷新信号（周期切换时置 true，worker 立即响应）
+    refresh_now: Arc<AtomicBool>,
     /// 插件管理器（GUI 线程专用）
     plugin_manager: Option<focusflow_core::plugins::manager::PluginManager>,
     /// 当前打开的插件窗口名
     open_plugin: Option<String>,
     /// 插件输入框缓冲：{plugin.field: 值}
     plugin_inputs: HashMap<String, String>,
+    /// 导入旧数据结果提示
+    import_result: Option<String>,
+    /// 导入线程结果槽（后台线程写入，UI 每帧轮询）
+    import_result_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -283,6 +305,7 @@ impl FocusFlowApp {
         let dark = focusflow_core::config::instance().get("gui", "theme") == "dark";
         let shared = Arc::new(Mutex::new(SharedStats::default()));
         let period = Arc::new(AtomicI64::new(-1)); // 默认今日
+        let refresh_now = Arc::new(AtomicBool::new(false));
         let mut app = Self {
             config: focusflow_core::config::instance(),
             handle: Arc::clone(&handle),
@@ -293,12 +316,16 @@ impl FocusFlowApp {
             _hotkey: None,
             theme: if dark { Theme::dark() } else { Theme::light() },
             dark,
+            theme_applied: false,
             current_view: View::Rank,
             shared: Arc::clone(&shared),
             period: Arc::clone(&period),
+            refresh_now: Arc::clone(&refresh_now),
             plugin_manager: None,
             open_plugin: None,
             plugin_inputs: HashMap::new(),
+            import_result: None,
+            import_result_slot: None,
         };
         // 初始化插件管理器（加载 plugins/*.lua）
         let mut pm = focusflow_core::plugins::manager::PluginManager::new(
@@ -309,7 +336,7 @@ impl FocusFlowApp {
         pm.enable_hot_reload();
         app.plugin_manager = Some(pm);
         // 启动后台统计线程
-        spawn_stats_worker(Arc::clone(&app.db), app.config, shared, period);
+        spawn_stats_worker(Arc::clone(&app.db), app.config, shared, period, refresh_now);
         app.setup_fonts(cc);
         handle.set_ctx(cc.egui_ctx.clone());
         app.init_system();
@@ -366,6 +393,7 @@ impl FocusFlowApp {
             .set("gui", "theme", if self.dark { "dark" } else { "light" })
             .ok();
         self.theme.apply(ctx);
+        self.theme_applied = true;
         ctx.request_repaint();
     }
 
@@ -424,6 +452,8 @@ impl FocusFlowApp {
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // 轮询导入线程结果
+        self.poll_import_result();
         ui.heading(egui::RichText::new("设置").size(20.0).strong());
         ui.add_space(12.0);
         ui.separator();
@@ -475,7 +505,22 @@ impl FocusFlowApp {
                 self.db.flush(true);
                 focusflow_core::db::maintenance::vacuum_all();
             }
+            if ui.button("导入旧数据").clicked() {
+                self.do_import_legacy();
+            }
         });
+        if let Some(result) = &self.import_result {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(result)
+                    .size(13.0)
+                    .color(if result.contains("错误") || result.contains("失败") {
+                        self.theme.danger
+                    } else {
+                        self.theme.success
+                    }),
+            );
+        }
 
         ui.add_space(16.0);
         ui.label(egui::RichText::new(format!(
@@ -484,6 +529,64 @@ impl FocusFlowApp {
         ))
         .color(self.theme.muted)
         .size(12.0));
+    }
+
+    /// 执行旧数据导入（选择目录 → 后台执行 → 更新结果）。
+    fn do_import_legacy(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("选择旧版 FocusFlow 数据目录（data 文件夹）")
+            .pick_folder();
+        let Some(dir) = picked else {
+            return; // 用户取消
+        };
+        // 后台线程执行导入，结果写入槽供 UI 轮询
+        let slot: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let slot_thread = Arc::clone(&slot);
+        let dir_for_thread = dir.clone();
+        std::thread::Builder::new()
+            .name("import-legacy".into())
+            .spawn(move || {
+                let summary = focusflow_core::migration::import_legacy_data(&dir_for_thread);
+                let mut lines: Vec<String> = Vec::new();
+                if summary.year_dbs.is_empty() && summary.copied_aux.is_empty() {
+                    lines.push("未发现可导入的数据".to_string());
+                }
+                for (year, count) in &summary.records_by_year {
+                    lines.push(format!("{year} 年度键鼠: {count} 条"));
+                }
+                if !summary.copied_aux.is_empty() {
+                    lines.push(format!("附属数据: {}", summary.copied_aux.join(", ")));
+                }
+                if !summary.errors.is_empty() {
+                    for e in &summary.errors {
+                        lines.push(format!("错误: {e}"));
+                    }
+                }
+                let text = lines.join("；");
+                *slot_thread.lock().unwrap() = Some(text);
+            })
+            .expect("启动导入线程失败");
+        self.import_result_slot = Some(slot);
+        self.import_result = Some(format!("正在从 {} 导入旧数据...", dir.display()));
+        // 触发后台统计刷新以反映导入数据
+        self.db.flush(false);
+        focusflow_core::db::queries::invalidate_years_cache();
+    }
+
+    /// 轮询导入线程结果（每帧调用）。
+    fn poll_import_result(&mut self) {
+        let slot = match self.import_result_slot.take() {
+            Some(s) => s,
+            None => return,
+        };
+        let done = {
+            let mut guard = slot.lock().unwrap();
+            guard.take()
+        };
+        match done {
+            Some(result) => self.import_result = Some(result),
+            None => self.import_result_slot = Some(slot), // 未完成，下帧再查
+        }
     }
 
     fn show_content(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -526,7 +629,7 @@ impl FocusFlowApp {
                     .inner_margin(egui::Margin::symmetric(16, 12))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        stats.show(ui, &self.theme, self.config, &self.db, &self.period);
+                        stats.show(ui, &self.theme, self.config, &self.db, &self.period, &self.refresh_now);
                     });
                 ui.add_space(8.0);
 
@@ -723,8 +826,11 @@ impl eframe::App for FocusFlowApp {
             return;
         }
 
-        // 应用主题
-        self.theme.apply(&ctx);
+        // 应用主题（仅在构造时 + 切换主题时调用；每帧调用会触发 egui 全量重排导致卡顿）
+        if !self.theme_applied {
+            self.theme.apply(&ctx);
+            self.theme_applied = true;
+        }
 
         egui::CentralPanel::default()
             .frame(

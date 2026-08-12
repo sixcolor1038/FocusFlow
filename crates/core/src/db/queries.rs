@@ -237,11 +237,13 @@ fn stats_multi_year(years: &[i32], days: Option<i64>) -> (i64, HashMap<String, i
     }
 
     let (where_clause, params) = where_cutoff(days);
-    // 构建 UNION ALL 查询
-    let mut parts = vec![format!("SELECT key_name, COUNT(*) as cnt FROM key_log {where_clause}")];
+    // 构建 UNION ALL 查询（每个子查询必须 GROUP BY key_name）
+    let mut parts = vec![format!(
+        "SELECT key_name, COUNT(*) as cnt FROM key_log {where_clause} GROUP BY key_name"
+    )];
     for alias in &aliases {
         parts.push(format!(
-            "SELECT key_name, COUNT(*) as cnt FROM {alias}.key_log {where_clause}"
+            "SELECT key_name, COUNT(*) as cnt FROM {alias}.key_log {where_clause} GROUP BY key_name"
         ));
     }
     let union_sql = parts.join(" UNION ALL ");

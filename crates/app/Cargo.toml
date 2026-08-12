@@ -37,3 +37,6 @@ windows = { version = "0.62", features = [
 
 # 图标解码（PNG -> RGBA，供托盘图标）
 image = "0.25"
+
+# 原生文件对话框（导入旧数据选目录）
+rfd = "0.15"

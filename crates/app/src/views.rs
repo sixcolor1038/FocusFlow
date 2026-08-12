@@ -190,6 +190,7 @@ impl StatsPanel {
         _config: &'static focusflow_core::config::FocusFlowConfig,
         _db: &Arc<focusflow_core::db::Database>,
         period_shared: &Arc<std::sync::atomic::AtomicI64>,
+        refresh_now: &Arc<std::sync::atomic::AtomicBool>,
     ) {
         // 周期选择栏（居中）
         ui.horizontal(|ui| {
@@ -209,8 +210,9 @@ impl StatsPanel {
                     Period::Days(d) => period == d,
                 };
                 if ui.selectable_label(selected, label).clicked() {
-                    // 更新共享周期，后台线程自动重新查询
+                    // 更新共享周期 + 触发后台线程立即重新查询（即时响应）
                     period_shared.store(period, std::sync::atomic::Ordering::Relaxed);
+                    refresh_now.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });
