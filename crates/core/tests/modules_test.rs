@@ -6,6 +6,7 @@ mod tests {
     use std::sync::OnceLock;
 
 use focusflow_core::accounting;
+use focusflow_core::edge_history;
 use focusflow_core::paths;
 use focusflow_core::pomodoro;
 use focusflow_core::scheduler;
@@ -142,6 +143,33 @@ use focusflow_core::scheduler;
         // 删除
         assert!(accounting::delete_expense(id1));
         assert_eq!(accounting::get_all_expenses(10).len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn edge_history_storage() {
+        let _g = guard();
+        let dir = std::env::temp_dir().join(format!("ff_edge_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        paths::set_app_dir(&dir);
+
+        // 保存计数到本地趋势库
+        let today = chrono::Local::now().date_naive();
+        let prev = today - chrono::Days::new(1);
+        edge_history::save_edge_history_count(today, 100);
+        edge_history::save_edge_history_count(prev, 50);
+
+        // 读取趋势
+        let counts = edge_history::get_edge_history_counts(30);
+        assert!(!counts.is_empty(), "应有趋势数据");
+        // 应包含今天和昨天
+        let today_str = today.format("%Y-%m-%d").to_string();
+        let prev_str = prev.format("%Y-%m-%d").to_string();
+        let today_found = counts.iter().find(|(d, _)| *d == today_str).map(|(_, c)| *c);
+        let prev_found = counts.iter().find(|(d, _)| *d == prev_str).map(|(_, c)| *c);
+        assert_eq!(today_found, Some(100));
+        assert_eq!(prev_found, Some(50));
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Datelike;
+use rusqlite::Connection;
 
 use crate::db::connection;
 use crate::paths;
@@ -182,6 +183,9 @@ fn writer_loop(
 ) {
     let mut batch: Vec<KeyEvent> = Vec::with_capacity(batch_size * 2);
     let mut last_flush = Instant::now();
+    // 持久连接：跨年时重建，避免每批重开
+    let mut conn: Option<Connection> = None;
+    let mut conn_year: i32 = 0;
 
     loop {
         // 阻塞等待事件或信号（100ms 超时保证定时 flush 检查）。
@@ -215,7 +219,7 @@ fn writer_loop(
                 Ok(Signal::Stop) => {
                     // 退出前 flush 残留
                     if !batch.is_empty() {
-                        write_batch(&state, &batch);
+                        write_batch(&mut conn, &mut conn_year, &state, &batch);
                         batch.clear();
                     }
                     for d in pending_done {
@@ -233,7 +237,7 @@ fn writer_loop(
         // flush：立即写空
         if flush_requested {
             if !batch.is_empty() {
-                write_batch(&state, &batch);
+                write_batch(&mut conn, &mut conn_year, &state, &batch);
                 batch.clear();
             }
             last_flush = Instant::now();
@@ -247,7 +251,7 @@ fn writer_loop(
             || (!batch.is_empty() && last_flush.elapsed() >= flush_interval)
         {
             tracing::debug!("写批触发: batch={} elapsed={:?}", batch.len(), last_flush.elapsed());
-            write_batch(&state, &batch);
+            write_batch(&mut conn, &mut conn_year, &state, &batch);
             batch.clear();
             last_flush = Instant::now();
         }
@@ -255,7 +259,7 @@ fn writer_loop(
         if disconnected {
             // 发送端已关闭且无 Stop 信号（异常路径），退出
             if !batch.is_empty() {
-                write_batch(&state, &batch);
+                write_batch(&mut conn, &mut conn_year, &state, &batch);
             }
             state.alive.store(false, Ordering::Relaxed);
             return;
@@ -267,8 +271,30 @@ fn writer_loop(
     }
 }
 
-/// 批量写入（单事务 + 重试 + 逐条兜底），镜像 `_DBWriter._write_batch`。
-fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
+/// 确保连接指向当前年份库（跨年时重建）。
+fn ensure_connection(conn: &mut Option<Connection>, conn_year: &mut i32) {
+    let now_year = paths::current_year();
+    if *conn_year == now_year && conn.is_some() {
+        return;
+    }
+    // 跨年或首次：重建连接
+    *conn = None;
+    let path = paths::year_db_path(now_year);
+    if let Ok(new_conn) = connection::open_rw(&path) {
+        if connection::ensure_schema(&new_conn, now_year).is_ok() {
+            *conn = Some(new_conn);
+            *conn_year = now_year;
+        }
+    }
+}
+
+/// 批量写入（单事务 + 重试 + 逐条兜底），复用持久连接。
+fn write_batch(
+    conn: &mut Option<Connection>,
+    conn_year: &mut i32,
+    state: &WriterState,
+    batch: &[KeyEvent],
+) {
     if batch.is_empty() {
         return;
     }
@@ -276,26 +302,22 @@ fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
     let mut last_err: Option<anyhow::Error> = None;
 
     for attempt in 0..max_retries {
-        let now_year = paths::current_year();
+        // 同步 db_year 状态（供外部查询）
         {
             let mut db_year = state.db_year.lock().unwrap();
-            if *db_year != now_year {
-                let path = paths::year_db_path(now_year);
-                if let Ok(conn) = connection::open_rw(&path) {
-                    if connection::ensure_schema(&conn, now_year).is_ok() {
-                        *db_year = now_year;
-                    }
-                }
+            if *db_year != paths::current_year() {
+                *db_year = paths::current_year();
             }
         }
+        // 确保连接可用（跨年重建）
+        ensure_connection(conn, conn_year);
 
-        let path = paths::current_year_db_path();
         let result = (|| -> anyhow::Result<()> {
-            let conn = connection::open_rw(&path)?;
-            conn.execute("BEGIN IMMEDIATE;", [])?;
+            let c = conn.as_mut().ok_or_else(|| anyhow::anyhow!("无可用连接"))?;
+            c.execute("BEGIN IMMEDIATE;", [])?;
             let insert = || -> anyhow::Result<()> {
                 // prepare 一次 + 循环绑定执行（rusqlite 标准批量方式）
-                let mut stmt = conn.prepare("INSERT INTO key_log (key_name, timestamp) VALUES (?1, ?2)")?;
+                let mut stmt = c.prepare("INSERT INTO key_log (key_name, timestamp) VALUES (?1, ?2)")?;
                 for (key, ts) in batch {
                     stmt.execute(rusqlite::params![key, ts])?;
                 }
@@ -303,11 +325,11 @@ fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
             };
             match insert() {
                 Ok(()) => {
-                    conn.execute("COMMIT;", [])?;
+                    c.execute("COMMIT;", [])?;
                     Ok(())
                 }
                 Err(e) => {
-                    let _ = conn.execute("ROLLBACK;", []);
+                    let _ = c.execute("ROLLBACK;", []);
                     Err(e)
                 }
             }
@@ -320,6 +342,8 @@ fn write_batch(state: &WriterState, batch: &[KeyEvent]) {
             }
             Err(e) => {
                 last_err = Some(e);
+                // 连接可能损坏，重置以强制重建
+                *conn = None;
                 if attempt < max_retries - 1 {
                     tracing::warn!(
                         "批量写入失败 (第{}次, {}条), 重试: {}",

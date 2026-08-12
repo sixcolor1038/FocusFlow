@@ -7,6 +7,7 @@ pub mod accounting;
 pub mod autostart;
 pub mod config;
 pub mod db;
+pub mod edge_history;
 pub mod listener;
 pub mod logger;
 pub mod paths;

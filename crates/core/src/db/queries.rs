@@ -88,6 +88,12 @@ fn local_day_start_ts(date: chrono::NaiveDate) -> i64 {
     local_dt.timestamp()
 }
 
+/// 本地时区相对 UTC 的偏移秒数（用于 SQL 整数日分组）。
+fn local_utc_offset_seconds() -> i64 {
+    // 本地时区偏移（如 UTC+8 = 28800 秒）
+    Local::now().offset().local_minus_utc() as i64
+}
+
 /// 查询单个年份库时间范围内计数。
 fn query_count_range(year: i32, start: i64, end: i64) -> i64 {
     let path = paths::year_db_path(year);
@@ -342,9 +348,15 @@ pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
             continue;
         }
         let start_ts = local_day_start_ts(start);
+        // 优化：用本地时区偏移的整数分组代替 date() 函数（避免逐行函数调用）
+        let tz_offset = local_utc_offset_seconds();
         let mut stmt = conn
             .prepare(
-                "SELECT timestamp, COUNT(*) as cnt FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY date(timestamp, 'unixepoch', 'localtime')",
+                &format!(
+                    "SELECT (timestamp + {tz_offset}) / 86400 as day, COUNT(*) as cnt \
+                     FROM key_log WHERE timestamp >= ?1 AND timestamp < ?2 \
+                     GROUP BY day"
+                ),
             )
             .unwrap();
         let rows = stmt
@@ -353,9 +365,10 @@ pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
             })
             .unwrap();
         for row in rows.flatten() {
-            let ts = row.0;
+            let day_epoch = row.0;
             let cnt = row.1;
-            let d = chrono::DateTime::from_timestamp(ts, 0)
+            // day_epoch = 该日 00:00 的 UTC 秒（已含时区偏移）
+            let d = chrono::DateTime::from_timestamp(day_epoch, 0)
                 .map(|dt| dt.with_timezone(&chrono::Local).date_naive());
             if let Some(d) = d {
                 if let Some(e) = daily_map.get_mut(&d) {

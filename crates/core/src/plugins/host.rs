@@ -16,6 +16,7 @@ use mlua::{Lua, Table, Value};
 use crate::accounting;
 use crate::config::FocusFlowConfig;
 use crate::db;
+use crate::edge_history;
 use crate::pomodoro::{self, PomodoroTimer};
 use crate::scheduler;
 
@@ -315,6 +316,35 @@ pub fn register_host_api(
         Ok((expense, income))
     })?;
     host.set("accounting_summary", acc_summary)?;
+
+    // ---- Edge 历史 API ----
+    let edge_update = lua.create_function(|_, ()| {
+        let (today, total) = edge_history::update_today_edge_history();
+        Ok((today, total))
+    })?;
+    host.set("edge_update_today", edge_update)?;
+
+    let edge_counts = lua.create_function(|lua, days: i64| {
+        let data = edge_history::get_edge_history_counts(days.clamp(1, 90));
+        let t = lua.create_table()?;
+        for (i, (date, count)) in data.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("date", date.as_str())?;
+            row.set("count", *count)?;
+            t.set(i + 1, row)?;
+        }
+        Ok(t)
+    })?;
+    host.set("edge_counts", edge_counts)?;
+
+    let edge_today = lua.create_function(|_, ()| {
+        let today = chrono::Local::now().date_naive();
+        Ok(edge_history::query_edge_history_count(today))
+    })?;
+    host.set("edge_today_count", edge_today)?;
+
+    let edge_total = lua.create_function(|_, ()| Ok(edge_history::query_edge_total_count()))?;
+    host.set("edge_total_count", edge_total)?;
 
     // 注册为全局 `focusflow`
     lua.globals().set("focusflow", host.clone())?;
