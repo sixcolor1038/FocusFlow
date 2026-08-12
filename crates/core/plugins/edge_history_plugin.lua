@@ -28,13 +28,16 @@ function on_action(id)
 end
 
 function get_view()
-    -- 首次加载时查询
-    if cached_today < 0 then
-        cached_today = focusflow.edge_today_count()
-        cached_total = focusflow.edge_total_count()
+    -- 延迟查询：首次打开不自动查 Edge 库（可能很大/被锁定），
+    -- 用户点击"刷新数据"才执行，避免加载卡顿
+    local today_display = "—"
+    local total_display = "—"
+    if cached_today >= 0 then
+        today_display = tostring(cached_today)
+        total_display = tostring(cached_total)
     end
 
-    -- 30 天趋势
+    -- 30 天趋势（本地缓存库，快）
     local counts = focusflow.edge_counts(30)
     local max_count = 0
     local rows = {}
@@ -47,8 +50,8 @@ function get_view()
         title = "Edge 历史记录",
         widgets = {
             { type = "heading", text = "概览" },
-            { type = "keyvalue", key = "今日记录数", value = tostring(cached_today) },
-            { type = "keyvalue", key = "总记录数", value = tostring(cached_total) },
+            { type = "keyvalue", key = "今日记录数", value = today_display },
+            { type = "keyvalue", key = "总记录数", value = total_display },
             { type = "keyvalue", key = "近30天峰值", value = tostring(max_count) },
             { type = "button", id = "refresh", text = "刷新数据" },
             { type = "separator" },
@@ -59,7 +62,7 @@ function get_view()
                 rows = rows,
             },
             { type = "separator" },
-            { type = "label", text = "数据来自 Edge 浏览器本地 History 数据库，不联网" },
+            { type = "label", text = "点击「刷新数据」从 Edge 浏览器读取最新记录（可能较慢）" },
         },
     }
 end
