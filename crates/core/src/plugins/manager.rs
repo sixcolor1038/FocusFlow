@@ -60,6 +60,21 @@ pub struct PluginManager {
     reload_tx: mpsc::Sender<String>,
 }
 
+impl Drop for PluginManager {
+    fn drop(&mut self) {
+        // 停止热重载线程，避免退出后仍扫描
+        self.stop_event.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.hot_reload_thread.take() {
+            let _ = handle.join();
+        }
+        // 卸载所有插件（调用 cleanup，释放 Lua 环境）
+        let names: Vec<String> = self.plugins.keys().cloned().collect();
+        for name in names {
+            self.unload_plugin(&name);
+        }
+    }
+}
+
 impl PluginManager {
     pub fn new(config: &'static FocusFlowConfig, db: Arc<db::Database>) -> Self {
         let (tx, rx) = mpsc::channel();
