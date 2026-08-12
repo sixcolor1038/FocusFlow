@@ -43,12 +43,11 @@ fn open_edge_history() -> (Option<Connection>, Option<PathBuf>) {
         return (None, None);
     }
     // 1) 只读直连
-    match Connection::open_with_flags(
+    if let Ok(conn) = Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
-        Ok(conn) => return (Some(conn), None),
-        Err(_) => {}
+        return (Some(conn), None);
     }
     // 2) 复制主库 + WAL + SHM
     let temp = paths::data_dir().join("_edge_history_temp.db");

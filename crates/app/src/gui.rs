@@ -68,7 +68,8 @@ pub fn spawn_stats_worker(
                 let counts: Vec<i64> = daily.iter().map(|(_, c)| *c).collect();
                 let avg = if counts.is_empty() { 0 } else { counts.iter().sum::<i64>() / counts.len() as i64 };
                 let max_day = counts.iter().copied().max().unwrap_or(0);
-                let trend = db::get_daily_counts(7, None);
+                // trend 复用 daily 查询结果（同一 7 天数据）
+                let trend = daily;
                 let hourly = db::queries::get_hourly_stats(None);
                 let wd = db::queries::get_weekday_stats(30);
                 let mut weekday: Vec<(i64, i64)> = wd.into_iter().collect();
