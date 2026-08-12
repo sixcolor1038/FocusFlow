@@ -245,6 +245,12 @@ pub struct FocusFlowApp {
     shared: Arc<Mutex<SharedStats>>,
     /// 当前周期（后台线程读取）
     period: Arc<AtomicI64>,
+    /// 插件管理器（GUI 线程专用）
+    plugin_manager: Option<focusflow_core::plugins::manager::PluginManager>,
+    /// 当前打开的插件窗口名
+    open_plugin: Option<String>,
+    /// 插件输入框缓冲：{plugin.field: 值}
+    plugin_inputs: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -254,6 +260,7 @@ enum View {
     Trend,
     Hourly,
     Weekday,
+    Plugins,
     Settings,
 }
 
@@ -280,7 +287,18 @@ impl FocusFlowApp {
             current_view: View::Rank,
             shared: Arc::clone(&shared),
             period: Arc::clone(&period),
+            plugin_manager: None,
+            open_plugin: None,
+            plugin_inputs: HashMap::new(),
         };
+        // 初始化插件管理器（加载 plugins/*.lua）
+        let mut pm = focusflow_core::plugins::manager::PluginManager::new(
+            app.config,
+            Arc::clone(&app.db),
+        );
+        pm.load_all();
+        pm.enable_hot_reload();
+        app.plugin_manager = Some(pm);
         // 启动后台统计线程
         spawn_stats_worker(Arc::clone(&app.db), app.config, shared, period);
         app.setup_fonts(cc);
@@ -376,6 +394,7 @@ impl FocusFlowApp {
                 (View::Trend, "趋势图"),
                 (View::Hourly, "小时分布"),
                 (View::Weekday, "星期分布"),
+                (View::Plugins, "插件管理"),
                 (View::Settings, "设置"),
             ] {
                 let selected = self.current_view == view;
@@ -552,10 +571,138 @@ impl FocusFlowApp {
                                 let mut weekday = WeekdayView { data: weekday_map };
                                 weekday.show(ui, &self.theme);
                             }
+                            View::Plugins => self.show_plugins_view(ui, ctx),
                             View::Settings => self.show_settings(ui, ctx),
                         }
                     });
             });
+    }
+
+    /// 插件管理视图：列出插件 + 打开插件窗口。
+    fn show_plugins_view(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        ui.heading(egui::RichText::new("插件管理").size(20.0).strong());
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("插件位于 plugins/ 目录（*.lua），修改文件后自动热重载")
+                .color(self.theme.muted)
+                .size(13.0),
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // 处理热重载请求
+        if let Some(pm) = &mut self.plugin_manager {
+            let reloaded = pm.poll_reload_requests();
+            if !reloaded.is_empty() {
+                tracing::info!("插件已热重载: {reloaded:?}");
+            }
+        }
+
+        let mut open_name: Option<String> = None;
+        let mut unload_name: Option<String> = None;
+        let plugins = self
+            .plugin_manager
+            .as_ref()
+            .map(|pm| pm.get_all_plugins())
+            .unwrap_or_default();
+
+        use egui_extras::{Column, TableBuilder};
+        TableBuilder::new(ui)
+            .striped(true)
+            .cell_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight))
+            .column(Column::auto().at_least(120.0).clip(true))
+            .column(Column::auto().at_least(200.0).clip(true))
+            .column(Column::auto().at_least(70.0).clip(true))
+            .column(Column::auto().at_least(80.0).clip(true))
+            .header(26.0, |mut header| {
+                header.col(|ui| { ui.strong("名称"); });
+                header.col(|ui| { ui.strong("描述"); });
+                header.col(|ui| { ui.strong("版本"); });
+                header.col(|ui| { ui.strong("操作"); });
+            })
+            .body(|mut body| {
+                for info in &plugins {
+                    body.row(34.0, |mut row| {
+                        row.col(|ui| { ui.label(egui::RichText::new(&info.name).size(14.0).strong()); });
+                        row.col(|ui| { ui.label(egui::RichText::new(&info.desc).size(13.0).color(self.theme.muted)); });
+                        row.col(|ui| { ui.label(&info.version); });
+                        row.col(|ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("打开").clicked() {
+                                    open_name = Some(info.name.clone());
+                                }
+                                if ui.button("卸载").clicked() {
+                                    unload_name = Some(info.name.clone());
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+
+        if let Some(name) = unload_name {
+            if let Some(pm) = &mut self.plugin_manager {
+                pm.unload_plugin(&name);
+            }
+        }
+        if let Some(name) = open_name {
+            self.open_plugin = Some(name);
+        }
+
+        // 打开插件窗口（模态）
+        if let Some(name) = self.open_plugin.clone() {
+            self.show_plugin_window(ui, &name);
+        }
+    }
+
+    /// 渲染插件窗口内容。
+    fn show_plugin_window(&mut self, ui: &mut egui::Ui, name: &str) {
+        let Some(pm) = &self.plugin_manager else {
+            return;
+        };
+        let Some(info) = pm.get_plugin(name) else {
+            self.open_plugin = None;
+            return;
+        };
+        let Some(view) = &info.view else {
+            ui.label(egui::RichText::new("插件未提供视图").size(14.0));
+            return;
+        };
+
+        // 窗口头
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&info.name).size(18.0).strong());
+            ui.label(
+                egui::RichText::new(format!("v{} · {}", info.version, info.author))
+                    .color(self.theme.muted)
+                    .size(13.0),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("关闭").clicked() {
+                    self.open_plugin = None;
+                }
+            });
+        });
+        ui.separator();
+        ui.add_space(6.0);
+
+        // 渲染视图，按钮触发 on_action，输入框触发 set_field
+        let mut on_button = |id: &str| {
+            if let Some(pm) = &self.plugin_manager {
+                if let Err(e) = pm.plugin_action(name, id) {
+                    tracing::warn!("插件动作失败: {e}");
+                }
+            }
+        };
+        let mut on_field = |field: &str, value: &str| {
+            if let Some(pm) = &self.plugin_manager {
+                if let Err(e) = pm.plugin_set_field(name, field, value) {
+                    tracing::debug!("插件 set_field 失败: {e}");
+                }
+            }
+        };
+        views::show_plugin_view(ui, view, &self.theme, &mut on_button, &mut on_field, &mut self.plugin_inputs);
     }
 }
 

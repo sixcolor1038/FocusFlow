@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 
+use focusflow_core::plugins::PluginView;
+use focusflow_core::plugins::Widget;
+
 /// 主题配色（对应 Python 版 THEMES，硬编码 light/dark 两套）。
 pub struct Theme {
     pub bg: egui::Color32,
@@ -533,6 +536,96 @@ fn draw_bar_chart(ui: &mut egui::Ui, theme: &Theme, title: &str, values: &[i64],
         for hour in (0..24).step_by(3) {
             let x = plot_rect.left() + hour as f32 * (bar_w + gap) + gap / 2.0 + bar_w / 2.0;
             painter.text(egui::pos2(x, plot_rect.bottom() + 14.0), egui::Align2::CENTER_CENTER, format!("{hour}时"), egui::FontId::proportional(9.0), theme.muted);
+        }
+    }
+}
+
+/// 渲染插件视图（声明式 UI）。
+/// `on_button: Fn(id)` 在按钮点击时调用；
+/// `on_field: Fn(field, value)` 输入框变化时调用；
+/// `input_bufs: {field: value}` 输入框值缓冲（跨帧保持）。
+pub fn show_plugin_view(
+    ui: &mut egui::Ui,
+    view: &PluginView,
+    theme: &Theme,
+    on_button: &mut dyn FnMut(&str),
+    on_field: &mut dyn FnMut(&str, &str),
+    input_bufs: &mut HashMap<String, String>,
+) {
+    if !view.title.is_empty() {
+        ui.heading(egui::RichText::new(&view.title).size(18.0).strong());
+        ui.add_space(8.0);
+    }
+    for widget in &view.widgets {
+        match widget {
+            Widget::Label(text) => {
+                ui.label(egui::RichText::new(text).size(14.0));
+                ui.add_space(2.0);
+            }
+            Widget::Heading(text) => {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(text).size(15.0).strong().color(theme.accent));
+                ui.add_space(2.0);
+            }
+            Widget::KeyValue(k, v) => {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{k}:")).size(14.0).color(theme.muted));
+                    ui.label(egui::RichText::new(v).size(14.0).strong());
+                });
+            }
+            Widget::Separator => {
+                ui.separator();
+                ui.add_space(2.0);
+            }
+            Widget::TextArea(text) => {
+                ui.label(egui::RichText::new(text).size(13.0).color(theme.muted));
+            }
+            Widget::Button { id, text } => {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(text).size(14.0)).min_size(egui::vec2(90.0, 28.0)))
+                    .clicked()
+                {
+                    on_button(id);
+                }
+            }
+            Widget::TextInput { field, label } => {
+                ui.horizontal(|ui| {
+                    if !label.is_empty() {
+                        ui.label(egui::RichText::new(format!("{label}:")).size(14.0).color(theme.muted));
+                    }
+                    // 跨帧保持输入值
+                    let buf = input_bufs.entry(field.clone()).or_default();
+                    if ui.text_edit_singleline(buf).changed() {
+                        on_field(field, buf);
+                    }
+                });
+            }
+            Widget::Table { headers, rows } => {
+                use egui_extras::{Column, TableBuilder};
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .cell_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight))
+                    .columns(Column::auto(), headers.len())
+                    .header(24.0, |mut header| {
+                        for h in headers {
+                            header.col(|ui| {
+                                ui.strong(egui::RichText::new(h).size(13.0));
+                            });
+                        }
+                    })
+                    .body(|mut body| {
+                        for row in rows {
+                            body.row(24.0, |mut r| {
+                                for cell in row {
+                                    r.col(|ui| {
+                                        ui.label(egui::RichText::new(cell).size(13.0));
+                                    });
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(4.0);
+            }
         }
     }
 }

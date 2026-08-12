@@ -307,6 +307,66 @@ impl PluginManager {
         }
         reloaded
     }
+
+    /// 调用插件函数（GUI 线程）。
+    /// 返回是否成功（函数存在且执行无错）。
+    pub fn call_plugin_fn<R>(&self, name: &str, fn_name: &str, args: mlua::MultiValue) -> Result<R, String>
+    where
+        R: mlua::FromLua + mlua::IntoLua,
+    {
+        let info = self.plugins.get(name).ok_or_else(|| format!("插件不存在: {name}"))?;
+        let lua = info.lua.as_ref().ok_or_else(|| format!("插件未加载: {name}"))?;
+        let f: mlua::Function = lua
+            .globals()
+            .get(fn_name)
+            .map_err(|e| format!("获取 {fn_name} 失败: {e}"))?;
+        let ret: R = f
+            .call(args)
+            .map_err(|e| format!("调用 {fn_name} 失败: {e}"))?;
+        Ok(ret)
+    }
+
+    /// 调用插件按钮动作。
+    pub fn plugin_action(&self, name: &str, action_id: &str) -> Result<(), String> {
+        let info = self.plugins.get(name).ok_or_else(|| format!("插件不存在: {name}"))?;
+        let lua = info.lua.as_ref().ok_or_else(|| format!("插件未加载: {name}"))?;
+        // 先检查是否有 on_action
+        if let Ok(on_action) = lua.globals().get::<mlua::Function>("on_action") {
+            let _: () = on_action
+                .call(action_id)
+                .map_err(|e| format!("on_action 失败: {e}"))?;
+            return Ok(());
+        }
+        Err("插件未定义 on_action".to_string())
+    }
+
+    /// 向插件投递按键事件（番茄钟联动等）。
+    pub fn plugin_key_event(&self, name: &str, key: &str) {
+        let info = match self.plugins.get(name) {
+            Some(i) => i,
+            None => return,
+        };
+        let lua = match &info.lua {
+            Some(l) => l,
+            None => return,
+        };
+        if let Ok(record_key) = lua.globals().get::<mlua::Function>("record_key") {
+            let _: mlua::Result<()> = record_key.call(key);
+        }
+    }
+
+    /// 调用插件 set_field(field, value)（输入框回传）。
+    pub fn plugin_set_field(&self, name: &str, field: &str, value: &str) -> Result<(), String> {
+        let info = self.plugins.get(name).ok_or_else(|| format!("插件不存在: {name}"))?;
+        let lua = info.lua.as_ref().ok_or_else(|| format!("插件未加载: {name}"))?;
+        if let Ok(set_field) = lua.globals().get::<mlua::Function>("set_field") {
+            let _: () = set_field
+                .call((field, value))
+                .map_err(|e| format!("set_field 失败: {e}"))?;
+            return Ok(());
+        }
+        Err("插件未定义 set_field".to_string())
+    }
 }
 
 /// 热重载检测循环：扫描插件目录 mtime，变更时发送重载请求。
@@ -363,6 +423,10 @@ fn parse_widget(w: &mlua::Table) -> mlua::Result<crate::plugins::Widget> {
         )),
         "separator" => Ok(Widget::Separator),
         "textarea" => Ok(Widget::TextArea(w.get("text").unwrap_or_default())),
+        "textinput" => Ok(Widget::TextInput {
+            field: w.get("field").unwrap_or_default(),
+            label: w.get("label").unwrap_or_default(),
+        }),
         "button" => Ok(Widget::Button {
             id: w.get("id").unwrap_or_default(),
             text: w.get("text").unwrap_or_default(),

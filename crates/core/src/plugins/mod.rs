@@ -24,10 +24,10 @@ pub struct PluginView {
     /// 控件列表
     pub widgets: Vec<Widget>,
 }
-
 /// 声明式控件。
 #[derive(Debug, Clone)]
-pub enum Widget {    /// 文本标签
+pub enum Widget {
+    /// 文本标签
     Label(String),
     /// 分组标题
     Heading(String),
@@ -47,4 +47,9 @@ pub enum Widget {    /// 文本标签
     Separator,
     /// 滚动文本区
     TextArea(String),
+    /// 文本输入框（field 用于回传给插件 set_field(field, value)）
+    TextInput {
+        field: String,
+        label: String,
+    },
 }

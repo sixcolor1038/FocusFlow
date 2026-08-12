@@ -1,12 +1,10 @@
 /target
 **/*.rs.bk
 
-# 运行时生成物（数据/日志/备份/配置）
-/data/
-/logs/
-/backup/
-/config.ini
-/window_state.ini
-/plugins/*.lua
-/plugins/*.py
-/dist/
+# 运行时生成物（数据/日志/备份/配置）——任意层级
+**/data/
+**/logs/
+**/backup/
+**/config.ini
+**/window_state.ini
+**/dist/
