@@ -372,7 +372,7 @@ document.querySelectorAll("#trend-days .tab").forEach((b) => {
   } catch (e) {
     console.error("读取主题失败", e);
   }
-  $("version").textContent = "FocusFlow v0.1.0";
+  $("version").textContent = "FocusFlow v0.2.0";
   try {
     await refresh();
   } catch (e) {}
