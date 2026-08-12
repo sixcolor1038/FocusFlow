@@ -27,7 +27,7 @@ pub struct Database {
 }
 
 impl Database {
-    /// 初始化：建表、归档检查、组合键迁移、启动写入线程。
+    /// 初始化：建表、旧数据聚合迁移、归档检查、启动写入线程。
     pub fn init(config: &FocusFlowConfig) -> anyhow::Result<Arc<Self>> {
         let year = chrono::Local::now().year();
         let path = crate::paths::year_db_path(year);
@@ -38,12 +38,12 @@ impl Database {
         drop(conn);
         tracing::info!("数据库初始化完成: {} (年份={year})", path.display());
 
+        // 旧版逐条数据 → 聚合表（先迁移，归档检查才能基于聚合表）
+        maintenance::migrate_v2();
+
         // 年度归档检查
         let yearly_archive = config.get_bool("database", "yearly_archive", true);
         maintenance::check_yearly_archive(yearly_archive);
-
-        // v1.2.1 组合键迁移
-        maintenance::migrate_combo_keys();
 
         invalidate_years_cache();
 
@@ -57,6 +57,8 @@ impl Database {
 
     /// 只读初始化（CLI 统计用，不启动写入线程）。
     pub fn init_readonly() -> Arc<Self> {
+        // 旧格式库也先聚合迁移（CLI 直接读用户数据目录）
+        maintenance::migrate_v2();
         invalidate_years_cache();
         Arc::new(Self { writer: None })
     }

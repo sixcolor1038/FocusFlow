@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FocusFlow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.focusflow.desktop",
   "build": {
     "frontendDist": "ui"
@@ -18,7 +18,8 @@
         "minHeight": 560,
         "resizable": true,
         "visible": false,
-        "url": "index.html"
+        "url": "index.html",
+        "additionalBrowserArgs": "--renderer-process-limit=1 --disable-gpu"
       },
       {
         "label": "floating",
@@ -32,19 +33,28 @@
         "skipTaskbar": true,
         "focus": true,
         "visible": false,
-        "url": "floating.html"
+        "url": "floating.html",
+        "additionalBrowserArgs": "--renderer-process-limit=1 --disable-gpu"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "publisher": "FocusFlow",
+    "publisher": "",
     "shortDescription": "FocusFlow - 效率与专注力分析工具",
-    "longDescription": "FocusFlow 键鼠活跃度统计与效率分析工具：实时追踪键盘鼠标活动、趋势分析、番茄钟与护眼提醒。"
+    "longDescription": "FocusFlow 键鼠活跃度统计与效率分析工具：实时追踪键盘鼠标活动、趋势分析、番茄钟与护眼提醒。",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "compression": "lzma"
+      }
+    }
   }
 }

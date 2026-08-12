@@ -13,15 +13,15 @@ pub fn setup_hotkey(app: &App) {
     }
 
     let result = app.global_shortcut().on_shortcut(hotkey_str.as_str(), |app, _shortcut, _event| {
-        // 显示/隐藏主窗口
+        // 显示/隐藏主窗口（隐藏=销毁，显示=重建）
         if let Some(win) = app.get_webview_window("main") {
             if win.is_visible().unwrap_or(false) {
-                let _ = win.hide();
+                crate::state::hide_main_window(app);
             } else {
-                let _ = win.show();
-                let _ = win.unminimize();
-                let _ = win.set_focus();
+                crate::state::show_main_window(app);
             }
+        } else {
+            crate::state::show_main_window(app);
         }
     });
 

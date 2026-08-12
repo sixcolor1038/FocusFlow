@@ -64,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_queue_protection() {
+    fn burst_aggregation_no_loss() {
         let _g = guard();
         let dir = std::env::temp_dir().join(format!("ff_bench2_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -75,7 +75,7 @@ mod tests {
         let database = db::Database::init(&config).unwrap();
         let writer = database.writer().unwrap().clone();
 
-        // 微秒级突发注入 10 万条：队列有界保护应丢弃多余，不 OOM 不 panic
+        // 微秒级突发注入 10 万条：内存聚合不丢数据、不 OOM、不 panic
         let now = chrono::Utc::now().timestamp();
         let start = Instant::now();
         for i in 0..100_000u64 {
@@ -83,17 +83,16 @@ mod tests {
         }
         let inject_time = start.elapsed();
 
-        // 等写线程消化
+        // 等写线程落库
         writer.flush(true);
         let (total, _) = db::get_stats(None, None);
         println!(
-            "突发 10 万条注入耗时 {:.1}ms，队列有界，落库 {total}（丢弃 {}）",
+            "突发 10 万条注入耗时 {:.1}ms，聚合落库 {total}（丢失 {}）",
             inject_time.as_millis(),
             100_000 - total
         );
-        // 有界：最多保留 MAX_QUEUE 附近数量，且绝不 panic/OOM
-        assert!(total > 0, "至少部分落库");
-        assert!(total < 100_000, "有界保护应丢弃多余事件");
+        // 聚合设计下所有事件都应计入（仅按键维度聚合，不丢量）
+        assert_eq!(total, 100_000, "聚合不应丢失事件");
 
         database.shutdown(&config);
         std::fs::remove_dir_all(&dir).ok();

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{App, Manager};
+use tauri::{App, AppHandle, Emitter, Manager};
 
 use focusflow_core::config::FocusFlowConfig;
 use focusflow_core::db::Database;
@@ -17,6 +17,28 @@ pub struct SharedStats {
     pub today_count: i64,
     pub cpm: i64,
     pub period: i64, // -1=今日, 0=总计, N=天数
+    pub total: i64,
+    pub avg: i64,
+    pub max_day: i64,
+    pub rank: Vec<(String, i64)>,
+    pub group: Vec<(String, i64)>,
+    pub trend: Vec<(String, i64)>,
+    pub trend30: Vec<(String, i64)>,
+    pub hourly: Vec<i64>,
+    pub weekday: Vec<(i64, i64)>,
+}
+
+/// 轻量实时数据（500ms 变化，事件 `stats-live` 推送）。
+#[derive(Clone, Serialize)]
+pub struct LiveStats {
+    pub today_count: i64,
+    pub cpm: i64,
+    pub period: i64, // -1=今日, 0=总计, N=天数
+}
+
+/// 重量级图表数据（周期切换 / 定时重聚合，事件 `stats-charts` 推送）。
+#[derive(Clone, Serialize)]
+pub struct ChartsStats {
     pub total: i64,
     pub avg: i64,
     pub max_day: i64,
@@ -63,6 +85,7 @@ impl AppState {
         let refresh_now = Arc::new(AtomicBool::new(false));
 
         spawn_stats_worker(
+            app.handle().clone(),
             Arc::clone(&db),
             config,
             Arc::clone(&shared),
@@ -97,6 +120,43 @@ impl AppState {
     }
 }
 
+/// 悬浮窗改为工具窗口（对齐 Python 版 WS_EX_TOOLWINDOW）：
+/// 任务管理器把"只有工具窗口可见"的进程归类为后台进程，而非应用。
+/// 注意：tauri 的 skipTaskbar 只调用 TaskbarList::DeleteTab 去掉任务栏按钮，
+/// 并不会设置 WS_EX_TOOLWINDOW，所以需要手动加扩展样式。
+fn make_floating_tool_window(win: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        let Ok(hwnd) = win.hwnd() else {
+            return;
+        };
+        unsafe {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_APPWINDOW,
+                WS_EX_TOOLWINDOW,
+            };
+            let hwnd = HWND(hwnd.0 as *mut _);
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            // 置 TOOLWINDOW 并清 APPWINDOW：任务管理器据此归类为后台进程
+            let want = (style | WS_EX_TOOLWINDOW.0 as i32) & !WS_EX_APPWINDOW.0 as i32;
+            if style != want {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, want);
+            }
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
 /// 设置窗口初始可见性与悬浮窗位置。
 fn setup_windows(app: &App, state: &AppState) {
     let config = focusflow_core::config::instance();
@@ -110,6 +170,7 @@ fn setup_windows(app: &App, state: &AppState) {
 
     // 悬浮窗：默认顶部靠右（对齐 Python 版），位置可持久化
     if let Some(win) = app.get_webview_window("floating") {
+        make_floating_tool_window(&win);
         let x = config.get_float("floating", "pos_x", f64::NAN);
         let y = config.get_float("floating", "pos_y", f64::NAN);
         if x.is_nan() || y.is_nan() {
@@ -127,6 +188,105 @@ fn setup_windows(app: &App, state: &AppState) {
             let _ = win.show();
         }
     }
+
+    // 启动即按当前活跃状态设置悬浮窗内存档位（启动进托盘=非活跃=Low）。
+    // 注意：WebView2 控制器是异步创建的，setup 阶段直接调用会静默失败，
+    // 因此延时 2 秒再设置（主窗口若已打开则保持 Normal）。
+    let handle = app.handle().clone();
+    std::thread::Builder::new()
+        .name("mem-level-init".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            let main_visible = handle
+                .get_webview_window("main")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false);
+            set_floating_memory_level(&handle, !main_visible);
+        })
+        .expect("启动内存档位初始化线程失败");
+}
+
+/// 设置各窗口 WebView2 内存档位：
+/// 应用活跃（主窗口可见）→ Normal；仅托盘/悬浮窗（非活跃）→ Low。
+/// WebView2 官方 MemoryUsageTargetLevel API，非活跃时设 Low 可显著降低内存占用。
+/// 主窗口虽隐藏但其页面仍在运行，同样要降档才能把内存压下来。
+pub fn set_floating_memory_level(app: &tauri::AppHandle, low: bool) {
+    for label in ["main", "floating"] {
+        if let Some(win) = app.get_webview_window(label) {
+            let low = low;
+            let _ = win.with_webview(move |webview| {
+                #[cfg(windows)]
+                unsafe {
+                    use webview2_com::Microsoft::Web::WebView2::Win32::{
+                        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+                        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+                    };
+                    use windows::core::Interface;
+                    let controller = webview.controller();
+                    if let Ok(core) = controller.CoreWebView2() {
+                        if let Ok(v19) = core.cast::<ICoreWebView2_19>() {
+                            let level = if low {
+                                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+                            } else {
+                                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+                            };
+                            let _ = v19.SetMemoryUsageTargetLevel(level);
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// 显示主窗口（不存在则重建，对齐 tauri.conf.json 的 main 窗口配置；
+/// 正常流程窗口常驻，重建仅作兜底）。
+pub fn show_main_window(app: &tauri::AppHandle) {
+    if app.get_webview_window("main").is_none() {
+        tracing::warn!("show_main: main 窗口不存在，重建");
+        let result = tauri::WebviewWindowBuilder::new(
+            app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("FocusFlow - 效率追踪器")
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(820.0, 560.0)
+        .resizable(true)
+        .visible(false)
+        .build();
+        match &result {
+            Ok(_) => tracing::info!("show_main: 重建成功"),
+            Err(e) => tracing::error!("show_main: 重建失败: {e}"),
+        }
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        // 恢复任务栏按钮（隐藏时切走过）
+        let _ = win.set_skip_taskbar(false);
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    // 应用进入活跃状态：悬浮窗回到 Normal 内存档位
+    set_floating_memory_level(app, false);
+}
+
+/// 隐藏主窗口（到托盘）：仅隐藏，不销毁。
+///
+/// 说明：WebView2 在同一进程内"销毁后重建控制器"不可靠（0x8007139F，
+/// 与是否先 Close() 无关），所以放弃销毁方案，窗口常驻内存、显示即恢复。
+/// 任务管理器重新分类用任务栏注册表项切换触发（见 hide_main_window）。
+pub fn hide_main_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+        // 促使任务管理器重新评估"应用/后台进程"：隐藏窗口不会触发窗口销毁
+        // 通知，TM 不会重新分类；AddTab/DeleteTab 产生 shell 事件，
+        // 让 TM 重新枚举（窗口已隐藏，切换无视觉影响）。
+        let _ = win.set_skip_taskbar(false);
+        let _ = win.set_skip_taskbar(true);
+    }
+    // 应用转入非活跃状态：悬浮窗降为 Low 内存档位
+    set_floating_memory_level(app, true);
 }
 
 /// 悬浮窗周期重申置顶（对齐 Python 版方案）：
@@ -148,9 +308,28 @@ fn keep_floating_on_top(app: &App) {
             unsafe {
                 use windows::Win32::Foundation::HWND;
                 use windows::Win32::UI::WindowsAndMessaging::{
-                    SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                    GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+                    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_APPWINDOW,
+                    WS_EX_TOOLWINDOW,
                 };
                 let hwnd = HWND(raw_hwnd as *mut _);
+                // 工具窗口样式：tao 的 skip_taskbar 只做 DeleteTab，仍会带 WS_EX_APPWINDOW，
+                // 任务管理器会把它当"应用"；这里每轮重申：置 TOOLWINDOW、清 APPWINDOW，
+                // 进程即可归类为后台进程（对齐 Python 版方案）。
+                let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                let want = (style | WS_EX_TOOLWINDOW.0 as i32) & !WS_EX_APPWINDOW.0 as i32;
+                if style != want {
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, want);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOPMOST),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                }
                 let _ = SetWindowPos(
                     hwnd,
                     Some(HWND_TOPMOST),
@@ -204,8 +383,10 @@ fn classify_key(key_name: &str) -> &'static str {
 }
 
 /// 后台统计线程（与 app 版同逻辑）：
-/// 快节奏 500ms 更新今日/CPM；重聚合在周期切换/超时/强制时执行。
+/// 快节奏 500ms 更新今日/CPM 并推送 `stats-live`；
+/// 重聚合在周期切换/超时/强制时执行并推送 `stats-charts`。
 fn spawn_stats_worker(
+    app: AppHandle,
     db: Arc<Database>,
     config: &'static FocusFlowConfig,
     shared: Arc<Mutex<SharedStats>>,
@@ -221,30 +402,29 @@ fn spawn_stats_worker(
             let active_heavy_ms = 5_000u64;
             let tick_ms = 500u64;
 
-            let mut h_total: i64 = 0;
-            let mut h_avg: i64 = 0;
-            let mut h_max: i64 = 0;
-            let mut h_rank: Vec<(String, i64)> = Vec::new();
-            let mut h_group: Vec<(String, i64)> = Vec::new();
-            let mut h_trend: Vec<(String, i64)> = Vec::new();
-            let mut h_trend30: Vec<(String, i64)> = Vec::new();
-            let mut h_hourly: Vec<i64> = vec![0; 24];
-            let mut h_weekday: Vec<(i64, i64)> = Vec::new();
-
             let mut prev_period: i64 = i64::MIN;
             let mut last_heavy = Instant::now() - Duration::from_secs(3600);
             let mut prev_today_count: i64 = -1;
+            let mut prev_cpm: i64 = -1;
+            // 上次重聚合时的今日计数：空闲且数据未变时跳过重聚合，避免无谓的整库查询
+            let mut last_heavy_today: i64 = -1;
 
             loop {
                 let period_val = period.load(Ordering::Relaxed);
                 let forced = refresh_now.swap(false, Ordering::Relaxed);
                 let period_changed = period_val != prev_period;
-                let active = {
-                    let c = db.writer().map(|w| w.today_count()).unwrap_or(0) as i64;
-                    c != prev_today_count
-                };
+                let cur_today = db.writer().map(|w| w.today_count()).unwrap_or(0) as i64;
+                let active = cur_today != prev_today_count;
                 let heavy_elapsed_ms = last_heavy.elapsed().as_millis() as u64;
-                let heavy_interval_ms = if active { active_heavy_ms } else { idle_heavy_ms };
+                let heavy_interval_ms = if active {
+                    active_heavy_ms
+                } else if cur_today != last_heavy_today {
+                    // 空闲但数据自上次重聚合后有变化：按空闲周期刷新
+                    idle_heavy_ms
+                } else {
+                    // 空闲且数据未变：无需重算，等有输入或强制/周期切换
+                    u64::MAX
+                };
                 let do_heavy = forced || period_changed || heavy_elapsed_ms >= heavy_interval_ms;
 
                 if do_heavy {
@@ -319,38 +499,60 @@ fn spawn_stats_worker(
                     weekday.sort_by_key(|(d, _)| *d);
                     let hourly = focusflow_core::db::queries::get_hourly_stats(None);
 
-                    h_total = total;
-                    h_avg = avg;
-                    h_max = max_day;
-                    h_rank = rank;
-                    h_group = group;
-                    h_trend = trend;
-                    h_trend30 = trend30;
-                    h_hourly = hourly;
-                    h_weekday = weekday;
                     last_heavy = Instant::now();
-                    prev_period = period_val;
+                    last_heavy_today = cur_today;
+
+                    let charts = ChartsStats {
+                        total,
+                        avg,
+                        max_day,
+                        rank,
+                        group,
+                        trend,
+                        trend30,
+                        hourly,
+                        weekday,
+                    };
+                    {
+                        let mut s = shared.lock().unwrap();
+                        s.total = charts.total;
+                        s.avg = charts.avg;
+                        s.max_day = charts.max_day;
+                        s.rank.clone_from(&charts.rank);
+                        s.group.clone_from(&charts.group);
+                        s.trend.clone_from(&charts.trend);
+                        s.trend30.clone_from(&charts.trend30);
+                        s.hourly.clone_from(&charts.hourly);
+                        s.weekday.clone_from(&charts.weekday);
+                    }
+                    let _ = app.emit("stats-charts", charts);
                 }
 
-                let today_count = focusflow_core::db::get_today_count(db.writer().map(|w| w.as_ref()));
+                let today_count = cur_today;
                 let cpm = focusflow_core::stats::cpm(config).get_cpm();
-                prev_today_count = today_count;
 
                 {
                     let mut s = shared.lock().unwrap();
                     s.today_count = today_count;
                     s.cpm = cpm;
                     s.period = period_val;
-                    s.total = h_total;
-                    s.avg = h_avg;
-                    s.max_day = h_max;
-                    s.rank.clone_from(&h_rank);
-                    s.group.clone_from(&h_group);
-                    s.trend.clone_from(&h_trend);
-                    s.trend30.clone_from(&h_trend30);
-                    s.hourly.clone_from(&h_hourly);
-                    s.weekday.clone_from(&h_weekday);
                 }
+
+                let live_changed =
+                    today_count != prev_today_count || cpm != prev_cpm || period_val != prev_period;
+                if live_changed {
+                    let _ = app.emit(
+                        "stats-live",
+                        LiveStats {
+                            today_count,
+                            cpm,
+                            period: period_val,
+                        },
+                    );
+                }
+                prev_today_count = today_count;
+                prev_cpm = cpm;
+                prev_period = period_val;
 
                 if today_count != prev_logged_today {
                     tracing::info!("统计更新: today={today_count} cpm={cpm}");

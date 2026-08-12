@@ -4,12 +4,53 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::state::{AppState, SharedStats};
+use crate::state::{AppState, ChartsStats, LiveStats, SharedStats};
 
 /// 获取统计快照（前端轮询）。
 #[tauri::command]
 pub fn get_stats(state: State<'_, Arc<AppState>>) -> SharedStats {
     state.shared.lock().unwrap().clone()
+}
+
+/// 获取轻量实时数据（今日/速度/周期）。
+#[tauri::command]
+pub fn get_live(state: State<'_, Arc<AppState>>) -> LiveStats {
+    let s = state.shared.lock().unwrap();
+    LiveStats {
+        today_count: s.today_count,
+        cpm: s.cpm,
+        period: s.period,
+    }
+}
+
+/// 获取重量级图表数据（排行/趋势/分布）。
+#[tauri::command]
+pub fn get_charts(state: State<'_, Arc<AppState>>) -> ChartsStats {
+    let s = state.shared.lock().unwrap();
+    ChartsStats {
+        total: s.total,
+        avg: s.avg,
+        max_day: s.max_day,
+        rank: s.rank.clone(),
+        group: s.group.clone(),
+        trend: s.trend.clone(),
+        trend30: s.trend30.clone(),
+        hourly: s.hourly.clone(),
+        weekday: s.weekday.clone(),
+    }
+}
+
+/// 一次性返回设置页所需全部配置（替代多次 get_config 轮询）。
+#[tauri::command]
+pub fn get_settings(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    let c = state.config;
+    serde_json::json!({
+        "theme": c.get("gui", "theme"),
+        "paused": state.listener.is_paused(),
+        "hotkey_enabled": c.get("hotkey", "enabled") == "true",
+        "hotkey_str": c.get("hotkey", "toggle_window"),
+        "floating_enabled": c.get("floating", "enabled") == "true",
+    })
 }
 
 /// 设置统计周期（-1=今日, N=天数, 0=总计）并触发即时重聚合。
@@ -46,22 +87,16 @@ pub fn is_paused(state: State<'_, Arc<AppState>>) -> bool {
     state.listener.is_paused()
 }
 
-/// 显示主窗口。
+/// 显示主窗口（不存在时重建）。
 #[tauri::command]
 pub fn show_main(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-    }
+    crate::state::show_main_window(&app);
 }
 
-/// 隐藏主窗口（到托盘）。
+/// 隐藏主窗口（到托盘）：销毁窗口以便任务管理器及时重新分类为后台进程。
 #[tauri::command]
 pub fn hide_main(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
+    crate::state::hide_main_window(&app);
 }
 
 /// 显示悬浮窗。
@@ -226,10 +261,13 @@ pub fn do_backup(state: State<'_, Arc<AppState>>) -> Result<String, String> {
         .ok_or_else(|| "备份失败".to_string())
 }
 
-/// 调试：前端写入日志（定位悬浮窗拖动问题）。
+/// 调试：前端写入日志（定位悬浮窗拖动问题）。发布版为 no-op。
 #[tauri::command]
 pub fn dbg_log(msg: String) {
+    #[cfg(debug_assertions)]
     tracing::info!("[floating-debug] {msg}");
+    #[cfg(not(debug_assertions))]
+    let _ = msg;
 }
 
 /// 列出插件（复用主线程共享的插件管理器）。

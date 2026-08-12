@@ -2,11 +2,13 @@
 "use strict";
 
 const invoke = window.__TAURI__.core.invoke;
+const { listen } = window.__TAURI__.event;
 
 const WD = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
 let currentView = "rank";
 let trendDays = 7;
+let chartsData = null;
 
 // ===== 工具 =====
 function $(id) { return document.getElementById(id); }
@@ -23,42 +25,45 @@ function switchView(view) {
     const el = $("view-" + id);
     if (el) el.style.display = id === view ? "" : "none";
   });
-  renderView();
+  renderCurrentView();
 }
 
-function renderView() {
-  if (currentView === "plugins") renderPlugins();
-  if (currentView === "settings") renderSettings();
+// 只渲染当前可见视图，避免每 500ms 全量重绘隐藏视图
+function renderCurrentView() {
+  if (currentView === "plugins") return renderPlugins();
+  if (currentView === "settings") return renderSettings();
+  if (!chartsData) return;
+  switch (currentView) {
+    case "rank": return renderRank(chartsData);
+    case "group": return renderGroup(chartsData);
+    case "trend": return renderTrend(chartsData);
+    case "hourly": return renderHourly(chartsData);
+    case "weekday": return renderWeekday(chartsData);
+  }
 }
 
 // ===== 统计快照 =====
-async function refresh() {
-  try {
-    const s = await invoke("get_stats");
-    $("st-today").textContent = fmt(s.today_count);
-    $("st-cpm").textContent = fmt(s.cpm) + " 次/分";
+// 轻量数据：今日/速度/周期（高频推送）
+function applyLive(s) {
+  $("st-today").textContent = fmt(s.today_count);
+  $("st-cpm").textContent = fmt(s.cpm) + " 次/分";
 
-    const periodLabel = s.period === -1 ? "今日" : s.period === 0 ? "总计" : s.period + "天";
-    $("st-total-label").textContent = "周期总数(" + periodLabel + ")";
-    $("st-total").textContent = fmt(s.total);
-    $("st-avg-label").textContent = s.period === -1 ? "日均(今日)" : s.period === 0 ? "日均(近30天)" : "日均(" + s.period + "天)";
-    $("st-avg").textContent = fmt(s.avg);
-    $("st-max").textContent = fmt(s.max_day);
+  const periodLabel = s.period === -1 ? "今日" : s.period === 0 ? "总计" : s.period + "天";
+  $("st-total-label").textContent = "周期总数(" + periodLabel + ")";
+  $("st-avg-label").textContent = s.period === -1 ? "日均(今日)" : s.period === 0 ? "日均(近30天)" : "日均(" + s.period + "天)";
 
-    // 周期高亮
-    document.querySelectorAll("#period-tabs .tab").forEach((b) => {
-      b.classList.toggle("active", Number(b.dataset.period) === s.period);
-    });
+  document.querySelectorAll("#period-tabs .tab").forEach((b) => {
+    b.classList.toggle("active", Number(b.dataset.period) === s.period);
+  });
+}
 
-    // 各视图渲染独立容错，单个失败不影响其他
-    try { renderRank(s); } catch (e) { console.error("rank", e); }
-    try { renderGroup(s); } catch (e) { console.error("group", e); }
-    try { renderTrend(s); } catch (e) { console.error("trend", e); }
-    try { renderHourly(s); } catch (e) { console.error("hourly", e); }
-    try { renderWeekday(s); } catch (e) { console.error("weekday", e); }
-  } catch (e) {
-    console.error("刷新失败", e);
-  }
+// 重量数据：图表/排行（低频推送，变化才更新）
+function applyCharts(s) {
+  chartsData = s;
+  $("st-total").textContent = fmt(s.total);
+  $("st-avg").textContent = fmt(s.avg);
+  $("st-max").textContent = fmt(s.max_day);
+  renderCurrentView();
 }
 
 // ===== 键鼠排行 =====
@@ -227,11 +232,12 @@ function closePlugin() {
 // ===== 设置 =====
 async function renderSettings() {
   const box = $("view-settings");
-  const dark = (await invoke("get_config", { section: "gui", key: "theme" })) === "dark";
-  const paused = await invoke("is_paused");
-  const hotkeyEnabled = (await invoke("get_config", { section: "hotkey", key: "enabled" })) === "true";
-  const hotkeyStr = await invoke("get_config", { section: "hotkey", key: "toggle_window" });
-  const floatingEnabled = (await invoke("get_config", { section: "floating", key: "enabled" })) === "true";
+  const s = await invoke("get_settings");
+  const dark = s.theme === "dark";
+  const paused = s.paused;
+  const hotkeyEnabled = s.hotkey_enabled;
+  const hotkeyStr = s.hotkey_str;
+  const floatingEnabled = s.floating_enabled;
 
   box.innerHTML = `
     <div class="section-title">常规</div>
@@ -296,7 +302,8 @@ async function doImport() {
     const msg = await invoke("import_legacy");
     $("set-msg").textContent = msg || "导入完成";
     $("set-msg").style.color = "var(--success)";
-    refresh();
+    applyLive(await invoke("get_live"));
+    applyCharts(await invoke("get_charts"));
   } catch (e) {
     $("set-msg").textContent = "导入失败: " + e;
     $("set-msg").style.color = "var(--danger)";
@@ -361,10 +368,11 @@ document.querySelectorAll("#trend-days .tab").forEach((b) => {
   b.addEventListener("click", () => {
     trendDays = Number(b.dataset.days);
     document.querySelectorAll("#trend-days .tab").forEach((x) => x.classList.toggle("active", x === b));
+    if (chartsData) renderTrend(chartsData);
   });
 });
 
-// 初始化主题 + 启动轮询（任何一步失败都不影响轮询）
+// 初始化主题 + 订阅事件 + 初始加载
 (async () => {
   try {
     const dark = (await invoke("get_config", { section: "gui", key: "theme" })) === "dark";
@@ -372,15 +380,17 @@ document.querySelectorAll("#trend-days .tab").forEach((b) => {
   } catch (e) {
     console.error("读取主题失败", e);
   }
-  $("version").textContent = "FocusFlow v0.2.0";
+  $("version").textContent = "FocusFlow v0.3.0";
   try {
-    await refresh();
-  } catch (e) {}
-  setInterval(() => {
-    try {
-      refresh();
-    } catch (e) {
-      console.error("刷新失败", e);
-    }
-  }, 500);
+    await listen("stats-live", (e) => applyLive(e.payload));
+    await listen("stats-charts", (e) => applyCharts(e.payload));
+  } catch (e) {
+    console.error("事件订阅失败", e);
+  }
+  try {
+    applyLive(await invoke("get_live"));
+    applyCharts(await invoke("get_charts"));
+  } catch (e) {
+    console.error("初始加载失败", e);
+  }
 })();

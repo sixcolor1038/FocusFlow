@@ -25,6 +25,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 已有实例在运行时再次启动 exe：聚焦并显示主窗口，第二个进程自行退出
+            crate::state::show_main_window(app);
+        }))
         .setup(|app| {
             // 初始化数据库、监听器、统计线程（复用 focusflow-core）
             state::AppState::init(app)?;
@@ -32,6 +36,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_stats,
+            commands::get_live,
+            commands::get_charts,
+            commands::get_settings,
             commands::set_period,
             commands::get_config,
             commands::set_config,
@@ -55,11 +62,12 @@ pub fn run() {
             commands::do_backup,
         ])
         .on_window_event(|window, event| {
-            // 主窗口关闭 → 隐藏到托盘（而非退出）；托盘"退出程序"才真正退出
+            // 主窗口关闭 → 隐藏到托盘（500ms 后仍隐藏才销毁，见 state::hide_main_window），
+            // 销毁可让任务管理器及时重新归类为后台进程；托盘"退出程序"才真正退出。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    let _ = window.hide();
                     api.prevent_close();
+                    state::hide_main_window(window.app_handle());
                 }
             }
         })
@@ -71,6 +79,8 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<Arc<state::AppState>>() {
                     state.db.shutdown(state.config);
                 }
+                // 配置去抖写盘：退出前强制落盘，避免丢失最后的设置
+                let _ = focusflow_core::config::instance().save();
             }
         });
 }

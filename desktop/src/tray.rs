@@ -22,6 +22,8 @@ static TRAY: Mutex<Option<TrayIcon<tauri::Wry>>> = Mutex::new(None);
 static PAUSE_ITEM: Mutex<Option<CheckMenuItem<tauri::Wry>>> = Mutex::new(None);
 /// 上次是否暂停（避免每次重设图标）
 static LAST_PAUSED: AtomicBool = AtomicBool::new(false);
+/// 托盘更新是否进行中（防止 set_tooltip/set_icon 卡住时下一轮再抢锁）
+static UPDATING: AtomicBool = AtomicBool::new(false);
 
 /// 设置托盘图标 + 菜单 + 事件 + 后台 tooltip/图标更新。
 pub fn setup_tray(app: &mut App) -> anyhow::Result<()> {
@@ -86,29 +88,39 @@ fn spawn_tray_updater(app: &App, paused_icon: tauri::image::Image<'static>) {
         .name("tray-updater".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
+            // 上一轮还没完成（托盘 COM 调用被卡住）则跳过本轮，
+            // 绝不让托盘调用阻塞其他线程（stats worker / get_stats）。
+            if UPDATING.swap(true, Ordering::SeqCst) {
+                continue;
+            }
             let Some(state) = handle.try_state::<Arc<AppState>>() else {
+                UPDATING.store(false, Ordering::SeqCst);
                 continue;
             };
-            let s = state.shared.lock().unwrap();
-            let paused = state.listener.is_paused();
-            let paused_now = LAST_PAUSED.swap(paused, Ordering::SeqCst) != paused;
-            let tooltip = format!(
-                "FocusFlow - 今日 {} · 速度 {}/分{}",
-                s.today_count,
-                s.cpm,
-                if paused { " · 已暂停" } else { "" }
-            );
+            // 锁内只拷贝数据，锁外才调用托盘 COM API
+            let (tooltip, paused_now, paused, tray) = {
+                let s = state.shared.lock().unwrap();
+                let paused = state.listener.is_paused();
+                let paused_now = LAST_PAUSED.swap(paused, Ordering::SeqCst) != paused;
+                let tooltip = format!(
+                    "FocusFlow - 今日 {} · 速度 {}/分{}",
+                    s.today_count,
+                    s.cpm,
+                    if paused { " · 已暂停" } else { "" }
+                );
+                (tooltip, paused_now, paused, TRAY.lock().unwrap().clone())
+            };
 
-            let tray = TRAY.lock().unwrap().clone();
             if let Some(tray) = tray {
                 let _ = tray.set_tooltip(Some(&tooltip));
                 if paused_now {
                     let _ = tray.set_icon(Some(if paused { paused_icon.clone() } else { normal_icon.clone() }));
                 }
             }
-            if let Some(item) = PAUSE_ITEM.lock().unwrap().as_ref() {
+            if let Some(item) = PAUSE_ITEM.lock().unwrap().clone() {
                 let _ = item.set_checked(paused);
             }
+            UPDATING.store(false, Ordering::SeqCst);
         })
         .expect("启动托盘更新线程失败");
 }
@@ -126,11 +138,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
 }
 
 fn show_main(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-    }
+    crate::state::show_main_window(app);
 }
 
 fn toggle_pause(app: &AppHandle) {

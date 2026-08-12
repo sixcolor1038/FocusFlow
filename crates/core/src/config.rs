@@ -9,7 +9,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::Duration;
 
 
 use crate::paths;
@@ -231,7 +232,9 @@ impl FocusFlowConfig {
                 .or_default()
                 .insert(key.to_string(), value.to_string());
         }
-        self.save()
+        // 去抖持久化：合并 300ms 窗口内的多次写入，避免高频调用（如悬浮窗位置）频繁整文件重写。
+        let _ = saver_tx().send(());
+        Ok(())
     }
 }
 
@@ -239,6 +242,30 @@ impl FocusFlowConfig {
 ///
 /// 首次访问时加载，仅一次。
 pub static INSTANCE: OnceLock<FocusFlowConfig> = OnceLock::new();
+
+/// 配置保存信号通道：`set` 写入内存后向后台线程发信号，去抖后落盘。
+static SAVE_TX: OnceLock<mpsc::Sender<()>> = OnceLock::new();
+
+/// 获取（必要时启动）配置保存线程，返回信号发送端。
+fn saver_tx() -> &'static mpsc::Sender<()> {
+    SAVE_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("config-saver".into())
+            .spawn(move || loop {
+                if rx.recv().is_err() {
+                    break;
+                }
+                // 收集 300ms 内的连续写请求，合并为一次落盘
+                while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+                if let Some(cfg) = INSTANCE.get() {
+                    let _ = cfg.save();
+                }
+            })
+            .ok();
+        tx
+    })
+}
 
 /// 获取全局配置实例；未初始化时用默认路径加载并初始化。
 pub fn instance() -> &'static FocusFlowConfig {

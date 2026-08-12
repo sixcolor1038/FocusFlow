@@ -1,8 +1,7 @@
-//! 数据库维护：年度归档、备份、VACUUM、清理、迁移。
+//! 数据库维护：聚合迁移、年度归档、备份、VACUUM、清理。
 //!
-//! 镜像 Python 版 `database.py` 的维护函数：
+//! - `migrate_v2`：旧版逐条数据 → 按天聚合表（一次性迁移 + 组合键名修正 + 压缩）
 //! - `_check_yearly_archive` / `_archive_year_data`：跨年数据归档
-//! - `_migrate_combo_keys`：Ctrl+X 组合键历史拆分迁移
 //! - 备份（SQLite 在线备份 API）+ 轮转
 //! - VACUUM + PRAGMA optimize
 //! - 清理旧数据
@@ -10,21 +9,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Local, NaiveDate};
 use rusqlite::Connection;
 
 use crate::db::connection;
 use crate::db::queries;
 use crate::paths;
-
-/// 本地时区：日期当天 00:00:00 的 Unix 秒（镜像 Python `time.mktime`）。
-fn local_midnight_ts(date: NaiveDate) -> i64 {
-    chrono::Local
-        .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("time"))
-        .single()
-        .expect("本地时区转换失败")
-        .timestamp()
-}
 
 /// 检查是否需要年度归档（当前年份库中存在上一年数据时）。
 pub fn check_yearly_archive(yearly_archive_enabled: bool) {
@@ -32,7 +22,9 @@ pub fn check_yearly_archive(yearly_archive_enabled: bool) {
         return;
     }
     let current_year = Local::now().year();
-    let year_start_ts = local_midnight_ts(NaiveDate::from_ymd_opt(current_year, 1, 1).expect("date"));
+    let year_start_dk = queries::day_key_of_date(
+        NaiveDate::from_ymd_opt(current_year, 1, 1).expect("date"),
+    );
 
     let path = paths::current_year_db_path();
     let conn = match connection::open_ro(&path) {
@@ -41,8 +33,8 @@ pub fn check_yearly_archive(yearly_archive_enabled: bool) {
     };
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM key_log WHERE timestamp < ?1",
-            [year_start_ts],
+            "SELECT COUNT(*) FROM daily_counts WHERE date_key < ?1",
+            [year_start_dk],
             |r| r.get(0),
         )
         .unwrap_or(0);
@@ -52,15 +44,14 @@ pub fn check_yearly_archive(yearly_archive_enabled: bool) {
         return;
     }
     let prev_year = current_year - 1;
-    tracing::info!("检测到 {count} 条 {prev_year} 年数据在当前库中，开始归档...");
+    tracing::info!("检测到 {count} 天 {prev_year} 年数据在当前库中，开始归档...");
     archive_year_data(prev_year, current_year);
 }
 
 /// 将 `source_year` 库中属于 `target_year` 的数据迁移到 `target_year` 库。
 pub fn archive_year_data(target_year: i32, source_year: i32) {
-    let year_start = local_midnight_ts(NaiveDate::from_ymd_opt(target_year, 1, 1).expect("date"));
-    let year_end =
-        local_midnight_ts(NaiveDate::from_ymd_opt(target_year + 1, 1, 1).expect("date"));
+    let y0 = queries::day_key_of_date(NaiveDate::from_ymd_opt(target_year, 1, 1).expect("date"));
+    let y1 = queries::day_key_of_date(NaiveDate::from_ymd_opt(target_year + 1, 1, 1).expect("date"));
 
     // 1. 确保 target_year 库有表结构
     let target_path = paths::year_db_path(target_year);
@@ -69,7 +60,7 @@ pub fn archive_year_data(target_year: i32, source_year: i32) {
         let _ = connection::ensure_schema(&conn, target_year);
     }
 
-    // 2-4. ATTACH 迁移
+    // 2-4. ATTACH 迁移（三张聚合表）
     let result = (|| -> anyhow::Result<()> {
         let conn = connection::open_rw(&target_path)?;
         conn.execute(
@@ -77,16 +68,21 @@ pub fn archive_year_data(target_year: i32, source_year: i32) {
             rusqlite::params![source_path.to_str().unwrap()],
         )?;
         conn.execute("BEGIN;", [])?;
-        let r1 = conn.execute(
-            "INSERT INTO key_log (key_name, timestamp) SELECT key_name, timestamp FROM source.key_log WHERE timestamp >= ?1 AND timestamp < ?2",
-            rusqlite::params![year_start, year_end],
-        );
-        let _ = r1;
-        let r2 = conn.execute(
-            "DELETE FROM source.key_log WHERE timestamp >= ?1 AND timestamp < ?2",
-            rusqlite::params![year_start, year_end],
-        );
-        let _ = r2;
+        for table in ["daily_counts", "hourly_counts", "key_counts"] {
+            let _ = conn.execute(
+                &format!(
+                    "INSERT INTO {table} SELECT * FROM source.{table} \
+                     WHERE date_key >= ?1 AND date_key < ?2"
+                ),
+                rusqlite::params![y0, y1],
+            );
+            let _ = conn.execute(
+                &format!(
+                    "DELETE FROM source.{table} WHERE date_key >= ?1 AND date_key < ?2"
+                ),
+                rusqlite::params![y0, y1],
+            );
+        }
         conn.execute("COMMIT;", [])?;
         conn.execute("DETACH DATABASE source", [])?;
         Ok(())
@@ -104,48 +100,110 @@ pub fn archive_year_data(target_year: i32, source_year: i32) {
     }
 }
 
-/// 拆分旧版 "Ctrl+X" 组合键记录（幂等）。
-/// - `Ctrl+字母` -> 字母本身
-/// - `Ctrl+127` -> Delete
-pub fn migrate_combo_keys() -> i64 {
-    let mut migrated = 0i64;
-    for year in queries::available_years() {
-        let path = paths::year_db_path(year);
-        let conn = match connection::open_rw(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let result = (|| -> anyhow::Result<i64> {
+/// 一次性迁移：把旧版逐条 `key_log` 数据聚合到三张聚合表，并压缩文件。
+///
+/// 幂等：迁移后 `key_log` 被清空，再次调用不重复聚合。
+/// 所有年度库都会被检查（含跨年归档的旧文件与导入的旧格式文件）。
+pub fn migrate_v2() {
+    let mut years: Vec<i32> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(paths::data_dir()) {
+        for entry in entries.flatten() {
+            if let Some(y) = paths::is_year_db_file(&entry.path()) {
+                years.push(y);
+            }
+        }
+    }
+    years.sort_unstable();
+    for year in years {
+        migrate_v2_file(&paths::year_db_path(year), year);
+    }
+    queries::invalidate_years_cache();
+}
+
+/// 迁移单个年度库，返回迁移的明细条数（无旧数据时为 0）。
+fn migrate_v2_file(path: &Path, year: i32) -> i64 {
+    let result = (|| -> anyhow::Result<i64> {
+        let conn = connection::open_rw(path)?;
+        connection::ensure_schema(&conn, year)?;
+        let has_key_log: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='key_log'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if !has_key_log {
+            return Ok(0);
+        }
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
+            .unwrap_or(0);
+        if row_count == 0 {
+            return Ok(0);
+        }
+
+        let off = queries::local_utc_offset_seconds();
+        conn.execute("BEGIN IMMEDIATE;", [])?;
+        conn.execute(
+            "INSERT INTO daily_counts (date_key, count)
+             SELECT CAST((timestamp + ?1) / 86400 AS INTEGER), COUNT(*)
+             FROM key_log GROUP BY 1",
+            [off],
+        )?;
+        conn.execute(
+            "INSERT INTO hourly_counts (date_key, hour, count)
+             SELECT CAST((timestamp + ?1) / 86400 AS INTEGER),
+                    CAST(((timestamp + ?1) / 3600) % 24 AS INTEGER),
+                    COUNT(*)
+             FROM key_log GROUP BY 1, 2",
+            [off],
+        )?;
+        conn.execute(
+            "INSERT INTO key_counts (date_key, key_name, count)
+             SELECT CAST((timestamp + ?1) / 86400 AS INTEGER), key_name, COUNT(*)
+             FROM key_log GROUP BY 1, 2",
+            [off],
+        )?;
+
+        // 旧版 Ctrl+X 组合键名修正
+        {
             let mut stmt = conn.prepare(
-                "SELECT DISTINCT key_name FROM key_log WHERE key_name GLOB 'Ctrl+*'",
+                "SELECT DISTINCT key_name FROM key_counts WHERE key_name GLOB 'Ctrl+*'",
             )?;
             let names: Vec<String> = stmt
                 .query_map([], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
-            let mut count = 0i64;
             for old in names {
-                let new = combo_key_mapping(&old);
-                if let Some(new) = new {
+                if let Some(new) = combo_key_mapping(&old) {
                     if new != old {
-                        let n = conn.execute(
-                            "UPDATE key_log SET key_name=?1 WHERE key_name=?2",
+                        let _ = conn.execute(
+                            "UPDATE key_counts SET key_name = ?1 WHERE key_name = ?2",
                             rusqlite::params![new, old],
-                        )?;
-                        count += n as i64;
+                        );
                     }
                 }
             }
-            Ok(count)
-        })();
-        match result {
-            Ok(n) => migrated += n,
-            Err(e) => tracing::warn!("组合键数据迁移失败（{year} 年）: {e}"),
         }
+
+        // 清空暂存表并标记
+        conn.execute("DELETE FROM key_log", [])?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_v2', '1')",
+            [],
+        )?;
+        conn.execute("COMMIT;", [])?;
+        Ok(row_count)
+    })();
+
+    match &result {
+        Ok(n) if *n > 0 => {
+            tracing::info!("旧数据已聚合迁移: {year} 年 {n} 条");
+            vacuum_path(path);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("聚合迁移失败（{year} 年）: {e}"),
     }
-    if migrated > 0 {
-        tracing::info!("组合键数据迁移完成：{migrated} 条 Ctrl+X 记录已按物理键拆分");
-    }
-    migrated
+    result.unwrap_or(0)
 }
 
 /// `Ctrl+X` -> 物理键名映射。
@@ -168,9 +226,9 @@ fn combo_key_mapping(old: &str) -> Option<String> {
     None
 }
 
-/// 清理 keep_days 天前的数据，返回删除条数。
+/// 清理 keep_days 天前的数据，返回删除的聚合行数。
 pub fn cleanup_old_data(keep_days: i64) -> i64 {
-    let cutoff = chrono::Utc::now().timestamp() - keep_days * 86_400;
+    let cutoff_dk = queries::day_key_of_date(Local::now().date_naive()) - keep_days;
     let mut total = 0i64;
     for year in queries::available_years() {
         let path = paths::year_db_path(year);
@@ -178,17 +236,19 @@ pub fn cleanup_old_data(keep_days: i64) -> i64 {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM key_log WHERE timestamp < ?1", [cutoff], |r| r.get(0))
-            .unwrap_or(0);
-        if count > 0 {
-            let n = conn.execute("DELETE FROM key_log WHERE timestamp < ?1", [cutoff]).unwrap_or(0);
+        for table in ["daily_counts", "hourly_counts", "key_counts"] {
+            let n = conn
+                .execute(
+                    &format!("DELETE FROM {table} WHERE date_key < ?1"),
+                    [cutoff_dk],
+                )
+                .unwrap_or(0);
             total += n as i64;
-            tracing::info!("从 {year} 年库删除 {count} 条旧数据");
         }
+        tracing::info!("已清理 {year} 年 {cutoff_dk} 前的聚合数据");
     }
     if total > 0 {
-        tracing::info!("共清理 {total} 条旧数据");
+        tracing::info!("共清理 {total} 行聚合数据");
     }
     total
 }
@@ -329,7 +389,7 @@ fn rotate_backups(max_keep: i64) {
     }
 }
 
-/// 清空所有年度库中的 key_log 数据，返回删除条数。
+/// 清空所有年度库的聚合数据，返回删除行数。
 pub fn reset_all_data() -> i64 {
     let mut total = 0i64;
     for year in queries::available_years() {
@@ -338,27 +398,25 @@ pub fn reset_all_data() -> i64 {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
-            .unwrap_or(0);
-        if count > 0 {
-            let n = conn.execute("DELETE FROM key_log", []).unwrap_or(0);
+        for table in ["daily_counts", "hourly_counts", "key_counts"] {
+            let n = conn
+                .execute(&format!("DELETE FROM {table}"), [])
+                .unwrap_or(0);
             total += n as i64;
         }
     }
     queries::invalidate_years_cache();
-    tracing::info!("已清空全部键鼠记录 {total} 条");
+    tracing::info!("已清空全部键鼠记录 {total} 行");
     total
 }
 
-/// 删除今日指定按键的所有记录（含队列中未入库数据由调用方处理），返回删除条数。
+/// 删除今日指定按键的聚合记录（含内存中未落库增量由调用方先 flush），返回删除行数。
 pub fn delete_key_today(key_name: &str) -> i64 {
     let key_name = key_name.trim();
     if key_name.is_empty() {
         return 0;
     }
-    let start = queries::today_start_ts();
-    let end = start + 86_400;
+    let today_dk = queries::day_key_of_date(Local::now().date_naive());
     let path = paths::current_year_db_path();
     let conn = match connection::open_rw(&path) {
         Ok(c) => c,
@@ -366,10 +424,21 @@ pub fn delete_key_today(key_name: &str) -> i64 {
     };
     let n = conn
         .execute(
-            "DELETE FROM key_log WHERE key_name=?1 AND timestamp >= ?2 AND timestamp < ?3",
-            rusqlite::params![key_name, start, end],
+            "DELETE FROM key_counts WHERE key_name=?1 AND date_key=?2",
+            rusqlite::params![key_name, today_dk],
         )
         .unwrap_or(0);
-    tracing::info!("已删除今日按键 [{key_name}] 的记录 {n} 条");
+    if n > 0 {
+        // 同步扣减今日总数，保持一致
+        let _ = conn.execute(
+            "UPDATE daily_counts SET count = count - ?1 WHERE date_key = ?2",
+            rusqlite::params![n, today_dk],
+        );
+        let _ = conn.execute(
+            "DELETE FROM daily_counts WHERE count <= 0 AND date_key = ?1",
+            [today_dk],
+        );
+    }
+    tracing::info!("已删除今日按键 [{key_name}] 的聚合记录 {n} 行");
     n as i64
 }

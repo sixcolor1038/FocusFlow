@@ -65,20 +65,32 @@ mod tests {
         assert!(summary.copied_aux.contains(&"focusflow_accounting.db".to_string()));
         assert!(summary.errors.is_empty(), "errors: {:?}", summary.errors);
 
-        // 验证目标库
+        // 验证目标库：聚合表有数据，暂存表已清空
         let new_db = paths::year_db_path(2025);
         assert!(new_db.exists());
         let conn = rusqlite::Connection::open(&new_db).unwrap();
         let cnt: i64 = conn
-            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(SUM(count), 0) FROM daily_counts",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(cnt, 3);
+        let staged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(staged, 0, "导入后暂存表应已清空");
 
         // 二次导入应幂等（去重，不再增加）
         let summary2 = migration::import_legacy_data(&old_dir);
         assert_eq!(summary2.records_by_year, vec![(2025, 0)], "二次导入应为 0 新增");
         let cnt2: i64 = conn
-            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(SUM(count), 0) FROM daily_counts",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(cnt2, 3, "去重后总数不变");
 

@@ -1,8 +1,10 @@
 //! SQLite 连接管理。
 //!
-//! 镜像 Python 版 `database.py` 的连接与 schema：
 //! - WAL + synchronous=NORMAL + busy_timeout + cache_size
-//! - `key_log` / `meta` 表结构与索引与 Python 版完全一致（保证文件兼容）
+//! - 聚合存储：`daily_counts` / `hourly_counts` / `key_counts` 三张按天聚合表
+//!   （每条按键不再落明细行，体积约为原来的 1/170）
+//! - `key_log` 仅作导入暂存表（旧版数据/导入合并时使用，聚合后清空）
+//! - `meta` 表记录元信息
 //! - 提供读写连接与只读连接两种打开方式
 
 use std::cell::RefCell;
@@ -19,7 +21,7 @@ thread_local! {
 }
 
 // 连接缓存上限：超过则整体清空，防止多年份库长期运行后无界增长。
-const RO_POOL_MAX: usize = 8;
+const RO_POOL_MAX: usize = 4;
 
 /// 使用缓存中的只读连接执行 `f`。连接不存在或打开失败时返回 `None`。
 pub fn with_ro_conn<T>(path: &Path, f: impl FnOnce(&Connection) -> T) -> Option<T> {
@@ -63,6 +65,8 @@ pub fn open_ro(path: &Path) -> anyhow::Result<Connection> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(std::time::Duration::from_secs(15))?;
+    // 只读连接用较小的页缓存（默认约 2MB，聚合表查询无需大缓存）
+    conn.pragma_update(None, "cache_size", -1024)?; // 1MB
     Ok(conn)
 }
 
@@ -86,6 +90,23 @@ pub fn ensure_schema(conn: &Connection, year: i32) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_timestamp ON key_log(timestamp);
         CREATE INDEX IF NOT EXISTS idx_key_name ON key_log(key_name);
+        -- 按天聚合表：date_key = 本地时区下的天数序号（1970-01-01 起）
+        CREATE TABLE IF NOT EXISTS daily_counts (
+            date_key INTEGER PRIMARY KEY,
+            count INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS hourly_counts (
+            date_key INTEGER NOT NULL,
+            hour INTEGER NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (date_key, hour)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS key_counts (
+            date_key INTEGER NOT NULL,
+            key_name TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (date_key, key_name)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -112,15 +133,25 @@ mod tests {
         let conn = open_rw(&path).unwrap();
         ensure_schema(&conn, 2026).unwrap();
         conn.execute(
-            "INSERT INTO key_log (key_name, timestamp) VALUES ('A', 1), ('B', 2)",
+            "INSERT INTO daily_counts (date_key, count) VALUES (20771, 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hourly_counts (date_key, hour, count) VALUES (20771, 10, 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO key_counts (date_key, key_name, count) VALUES (20771, 'A', 2)",
             [],
         )
         .unwrap();
 
         let total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM key_log", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM daily_counts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(total, 2);
+        assert_eq!(total, 1);
 
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();

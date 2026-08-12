@@ -21,7 +21,7 @@ pub const APP_DISPLAY_NAME: &str = "FocusFlow - 效率追踪器";
 /// 应用描述
 pub const APP_DESCRIPTION: &str = "FocusFlow - 效率与专注力分析工具";
 /// 版本号（后续从 Cargo 包版本自动生成）
-pub const APP_VERSION: &str = "0.2.0";
+pub const APP_VERSION: &str = "0.3.0";
 
 /// 进程级 app_dir 覆盖（测试/部署指定数据目录用）。
 ///

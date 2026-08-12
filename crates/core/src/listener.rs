@@ -424,14 +424,23 @@ impl InputListener {
         let this = Arc::clone(self);
         thread::Builder::new()
             .name("input-listener".into())
-            .spawn(move || {
-                let callback = move |event: Event| {
-                    this.process_event(&db, &event);
-                };
-                match listen(callback) {
-                    Ok(()) => tracing::info!("rdev listen 返回（异常结束）"),
-                    Err(e) => tracing::error!("键鼠监听启动失败: {e:?}"),
+            .spawn(move || loop {
+                if !*this.alive.lock().unwrap() {
+                    break;
                 }
+                let this2 = Arc::clone(&this);
+                let db2 = Arc::clone(&db);
+                let result = listen(move |event: Event| {
+                    this2.process_event(&db2, &event);
+                });
+                if !*this.alive.lock().unwrap() {
+                    break;
+                }
+                match result {
+                    Ok(()) => tracing::warn!("键鼠监听意外结束，5 秒后自动重启"),
+                    Err(e) => tracing::error!("键鼠监听失败，5 秒后自动重启: {e:?}"),
+                }
+                thread::sleep(Duration::from_secs(5));
             })
             .expect("启动输入监听线程失败");
         tracing::info!(
