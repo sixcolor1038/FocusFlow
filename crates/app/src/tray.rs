@@ -12,8 +12,6 @@ use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tray_icon::{TrayIconId};
 
-use focusflow_core::paths;
-
 /// 托盘菜单动作标识
 const MENU_SHOW: &str = "show";
 const MENU_PAUSE: &str = "pause";
@@ -169,25 +167,14 @@ fn handle_menu(event: MenuEvent, callbacks: &Arc<dyn TrayCallbacks>) {
 
 /// 加载托盘图标（正常/暂停）。
 ///
-/// 优先读 app_dir 下外部 PNG（用户可替换），缺失时回退到内嵌图标。
+/// 图标完全内嵌（include_bytes），不依赖外部文件——与 Python 版一致，
+/// 用户误删外部文件也不影响托盘。
 fn load_icon(paused: bool) -> anyhow::Result<Icon> {
-    let path = if paused {
-        paths::app_dir().join("focusflow_paused.png")
+    let png: &[u8] = if paused {
+        include_bytes!("../assets/focusflow_paused.png")
     } else {
-        paths::app_dir().join("focusflow.png")
+        include_bytes!("../assets/focusflow.png")
     };
-    // 外部文件优先
-    if path.exists() {
-        if let Ok(img) = image::open(&path) {
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            if let Ok(icon) = Icon::from_rgba(rgba.into_raw(), w, h) {
-                return Ok(icon);
-            }
-        }
-    }
-    // 内嵌兜底（正常图标；暂停态暂时用同一图标，保证托盘可用）
-    let png: &[u8] = include_bytes!("../assets/focusflow.png");
     let img = image::load_from_memory(png)
         .map_err(|e| anyhow::anyhow!("内嵌图标解码失败: {e}"))?;
     let rgba = img.to_rgba8();

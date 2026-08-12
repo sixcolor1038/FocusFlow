@@ -20,8 +20,6 @@ mkdir "%DIST%\plugins"
 mkdir "%DIST%\data"
 
 copy /y target\release\focusflow-app.exe "%DIST%\FocusFlow.exe" >nul
-copy /y E:\mydata\DeepSeekdata\code\FocusFlow\focusflow.png "%DIST%\" >nul
-copy /y E:\mydata\DeepSeekdata\code\FocusFlow\focusflow_paused.png "%DIST%\" >nul
 copy /y crates\core\plugins\*.lua "%DIST%\plugins\" >nul
 
 echo [3/3] Done!
