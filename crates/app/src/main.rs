@@ -76,8 +76,8 @@ fn main() -> anyhow::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport,
-        // 窗口尺寸/位置记忆（存到 app_dir/eframe_storage，数据与 exe 同目录）
-        persistence_path: Some(focusflow_core::paths::app_dir().join("eframe_storage")),
+        // 窗口尺寸/位置记忆（存到 data/ 目录，与程序数据统一）
+        persistence_path: Some(focusflow_core::paths::data_dir().join("eframe_storage")),
         ..Default::default()
     };
 
