@@ -10,6 +10,7 @@ pub mod db;
 pub mod edge_history;
 pub mod listener;
 pub mod logger;
+pub mod migration;
 pub mod paths;
 pub mod plugins;
 pub mod pomodoro;

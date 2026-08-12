@@ -115,10 +115,53 @@ fn run(args: &[String]) -> i32 {
                 }
             }
         }
+        "--import-legacy" => {
+            if args.len() < 2 {
+                eprintln!("用法: --import-legacy <旧数据目录>");
+                eprintln!("  从旧版（Python 原版或旧目录）导入全部数据到当前数据目录");
+                return 1;
+            }
+            import_legacy(&args[1])
+        }
         other => {
             eprintln!("未知参数: {other}");
             1
         }
+    }
+}
+
+/// 执行旧数据导入并打印汇总。
+fn import_legacy(src_dir: &str) -> i32 {
+    let src = std::path::Path::new(src_dir);
+    if !src.is_dir() {
+        eprintln!("旧数据目录不存在或不是目录: {src_dir}");
+        return 1;
+    }
+    let summary = focusflow_core::migration::import_legacy_data(src);
+    println!("\n=== 旧数据导入完成 ===");
+    if summary.year_dbs.is_empty() && summary.copied_aux.is_empty() {
+        println!("未发现可导入的数据");
+    }
+    for (year, count) in &summary.records_by_year {
+        println!("  {year} 年度键鼠: {count} 条记录");
+    }
+    if !summary.copied_aux.is_empty() {
+        println!("  附属数据: {}", summary.copied_aux.join(", "));
+    }
+    if !summary.skipped.is_empty() {
+        println!("  跳过: {}", summary.skipped.join(", "));
+    }
+    if !summary.errors.is_empty() {
+        println!("  错误:");
+        for e in &summary.errors {
+            println!("    {e}");
+        }
+    }
+    println!();
+    if summary.errors.is_empty() {
+        0
+    } else {
+        1
     }
 }
 
