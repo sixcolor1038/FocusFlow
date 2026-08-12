@@ -169,15 +169,27 @@ fn handle_menu(event: MenuEvent, callbacks: &Arc<dyn TrayCallbacks>) {
 
 /// 加载托盘图标（正常/暂停）。
 ///
-/// Windows 的 `Icon::from_path` 只支持 .ico，因此这里用 image crate
-/// 解码 PNG 后调用 `Icon::from_rgba`。
+/// 优先读 app_dir 下外部 PNG（用户可替换），缺失时回退到内嵌图标。
 fn load_icon(paused: bool) -> anyhow::Result<Icon> {
     let path = if paused {
         paths::app_dir().join("focusflow_paused.png")
     } else {
         paths::app_dir().join("focusflow.png")
     };
-    let img = image::open(&path).map_err(|e| anyhow::anyhow!("读取图标 {} 失败: {e}", path.display()))?;
+    // 外部文件优先
+    if path.exists() {
+        if let Ok(img) = image::open(&path) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            if let Ok(icon) = Icon::from_rgba(rgba.into_raw(), w, h) {
+                return Ok(icon);
+            }
+        }
+    }
+    // 内嵌兜底（正常图标；暂停态暂时用同一图标，保证托盘可用）
+    let png: &[u8] = include_bytes!("../assets/focusflow.png");
+    let img = image::load_from_memory(png)
+        .map_err(|e| anyhow::anyhow!("内嵌图标解码失败: {e}"))?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Icon::from_rgba(rgba.into_raw(), w, h)
