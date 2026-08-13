@@ -157,6 +157,31 @@ fn make_floating_tool_window(win: &tauri::WebviewWindow) {
     }
 }
 
+/// 悬浮窗目标尺寸（逻辑像素）。
+/// 注意：WebView2 在创建控制器时会把窗口强制拉宽到至少 120px，
+/// 导致 tauri.conf.json 里小于 120 的宽度被静默放大、右侧出现大片空白；
+/// 这里在窗口+WebView 构建完成后主动 set_size 缩回目标尺寸。
+/// 尺寸可在 config.ini 的 [floating] 段用 width/height 覆盖（免重编译）。
+fn enforce_floating_size(win: &tauri::WebviewWindow, config: &FocusFlowConfig) {
+    let w = config.get_float("floating", "width", 90.0);
+    let h = config.get_float("floating", "height", 46.0);
+    let _ = win.set_size(tauri::LogicalSize::new(w, h));
+    // WebView2 控制器是异步创建的，若放大发生在 setup 之后需要兜底；
+    // 启动后 4 秒内每秒重申一次（窗口不可手动缩放，不会与用户冲突）。
+    let handle = win.app_handle().clone();
+    std::thread::Builder::new()
+        .name("floating-size-enforce".into())
+        .spawn(move || {
+            for _ in 0..4 {
+                std::thread::sleep(Duration::from_secs(1));
+                if let Some(win_h) = handle.get_webview_window("floating") {
+                    let _ = win_h.set_size(tauri::LogicalSize::new(w, h));
+                }
+            }
+        })
+        .expect("启动悬浮窗尺寸修正线程失败");
+}
+
 /// 设置窗口初始可见性与悬浮窗位置。
 fn setup_windows(app: &App, state: &AppState) {
     let config = focusflow_core::config::instance();
@@ -171,6 +196,9 @@ fn setup_windows(app: &App, state: &AppState) {
     // 悬浮窗：默认顶部靠右（对齐 Python 版），位置可持久化
     if let Some(win) = app.get_webview_window("floating") {
         make_floating_tool_window(&win);
+        // WebView2 创建控制器时会把窗口强制放宽到至少 120px（内容实际只需 ~81px），
+        // 因此在窗口构建完成后主动缩回目标宽度，并延时重复几次兜底异步放大。
+        enforce_floating_size(&win, &config);
         let x = config.get_float("floating", "pos_x", f64::NAN);
         let y = config.get_float("floating", "pos_y", f64::NAN);
         if x.is_nan() || y.is_nan() {

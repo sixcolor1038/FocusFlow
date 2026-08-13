@@ -16,6 +16,7 @@ set DIST=E:\mydata\DeepSeekdata\code\FocusFlow\dist-tauri\FocusFlow
 if not exist "%DIST%" mkdir "%DIST%"
 if not exist "%DIST%\plugins" mkdir "%DIST%\plugins"
 if not exist "%DIST%\data" mkdir "%DIST%\data"
+if exist "%DIST%\FocusFlow.exe" del /q "%DIST%\FocusFlow.exe"
 copy /y target\release\focusflow-desktop.exe "%DIST%\FocusFlow.exe" >nul
 REM Keep existing config.ini (user settings); write default only on first deploy
 if not exist "%DIST%\config.ini" copy /y config.ini "%DIST%\config.ini" >nul
