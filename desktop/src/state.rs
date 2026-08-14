@@ -1,6 +1,6 @@
 //! 应用共享状态：数据库、监听器、统计快照与后台统计线程。
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,6 +61,27 @@ pub struct ChartsStats {
 
 /// 键鼠排行显示上限。
 const RANK_LIMIT: usize = 100;
+
+// ===== 主窗口懒创建 / 隐藏后卸载页面 状态（见 show_main_window / arm_main_unload）=====
+
+/// 与悬浮窗一致的 WebView2 浏览器启动参数。
+/// 注意：WebView2 环境由"首个创建的窗口"建立，之后创建的窗口参数会被忽略，
+/// 因此懒创建的主窗口必须与悬浮窗保持同一份参数。
+const WEBVIEW_BROWSER_ARGS: &str =
+    "--disable-background-networking --disable-component-update --no-first-run --disable-domain-reliability --disable-features=MediaRouter";
+
+/// 主窗口页面是否已被卸载到 about:blank（隐藏超时后卸载，释放页面内存）
+static MAIN_UNLOADED: AtomicBool = AtomicBool::new(false);
+/// 卸载前的页面 URL（重新显示时导航回去）
+static MAIN_URL: Mutex<Option<String>> = Mutex::new(None);
+/// 卸载任务是否已安排（显示时置 false 取消；任务唤醒后自行重置）
+static MAIN_UNLOAD_ARMED: AtomicBool = AtomicBool::new(false);
+/// 卸载/恢复决策互斥：防止"卸载线程"与"显示路径"竞态
+static MAIN_UNLOAD_LOCK: Mutex<()> = Mutex::new(());
+/// 主窗口显示/隐藏代次：恢复线程捕获后若期间又发生 hide/show 则放弃恢复，避免误弹出
+static MAIN_VIS_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// 主窗口懒创建任务是否在途（防重复调度）
+static MAIN_CREATING: AtomicBool = AtomicBool::new(false);
 
 /// 应用状态（由 Tauri manage 持有）。
 pub struct AppState {
@@ -228,33 +249,49 @@ fn setup_windows(app: &App, state: &AppState) {
         }
     }
 
-    // 启动即按当前活跃状态设置悬浮窗内存档位（启动进托盘=非活跃=Low）。
+    // 启动即同步 WebView2 后台状态（对齐 hide_main_window 的行为）：
+    // 1) 渲染管线：主窗口/悬浮窗隐藏时控制器仍认为自己可见、维持渲染合成管线，
+    //    必须 SetIsVisible(false) 停掉渲染，内存才能压到最低（用户实测：启动进托盘时
+    //    内存偏高，开一次主界面再关闭后才降到最低——根因就是启动时只设了内存档位、
+    //    没停主窗口渲染）；
+    // 2) 内存档位：主窗口隐藏（非活跃）→ Low，可见 → Normal。
     // 注意：WebView2 控制器是异步创建的，setup 阶段直接调用会静默失败，
-    // 因此后台线程重试直到控制器就绪（每次重试前重新判断主窗口可见性，
-    // 用户可能已打开主界面，此时应保持 Normal）。
+    // 因此后台线程重试直到渲染状态与内存档位全部就绪（每次重试前重新判断窗口可见性，
+    // 用户可能已打开主界面，此时应恢复渲染并保持 Normal）。
     let handle = app.handle().clone();
     std::thread::Builder::new()
-        .name("mem-level-init".into())
+        .name("webview-bg-state".into())
         .spawn(move || {
             // 冷启动 WebView2 环境创建可能较慢，最多重试 60 秒
             for i in 0..60 {
+                let mut all_ok = true;
+                // 渲染管线随窗口实际可见性同步（控制器未就绪时返回 false，继续重试；
+                // 主窗口懒创建：尚未创建的窗口跳过，不阻塞其他窗口的同步）
+                for label in ["main", "floating"] {
+                    let Some(win) = handle.get_webview_window(label) else {
+                        continue;
+                    };
+                    let visible = win.is_visible().unwrap_or(false);
+                    all_ok = set_webview_rendering(&handle, label, visible) && all_ok;
+                }
                 let main_visible = handle
                     .get_webview_window("main")
                     .map(|w| w.is_visible().unwrap_or(false))
                     .unwrap_or(false);
-                if set_floating_memory_level(&handle, !main_visible) {
+                all_ok = set_floating_memory_level(&handle, !main_visible) && all_ok;
+                if all_ok {
                     tracing::info!(
-                        "WebView2 内存档位已设置 (low={})，重试 {} 次",
-                        !main_visible,
+                        "WebView2 后台状态已同步 (main_visible={}, 重试 {} 次)",
+                        main_visible,
                         i
                     );
                     return;
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
-            tracing::warn!("WebView2 内存档位设置失败：控制器长时间未就绪");
+            tracing::warn!("WebView2 后台状态同步失败：控制器长时间未就绪");
         })
-        .expect("启动内存档位初始化线程失败");
+        .expect("启动 WebView2 后台状态同步线程失败");
 }
 
 /// 设置各窗口 WebView2 内存档位：
@@ -312,25 +349,79 @@ pub fn set_floating_memory_level(app: &tauri::AppHandle, low: bool) -> bool {
 /// 窗口隐藏时 WebView2 控制器并不知道自身不可见，仍会维持渲染合成管线；
 /// 调用 put_IsVisible(false) 可停止渲染、进一步释放内存与 CPU（WebView2 官方建议）。
 /// 显示窗口前必须先恢复 true，否则内容不会重绘。
-pub fn set_webview_rendering(app: &tauri::AppHandle, label: &str, visible: bool) {
-    if let Some(win) = app.get_webview_window(label) {
-        let _ = win.with_webview(move |webview| {
-            #[cfg(windows)]
-            unsafe {
-                let controller = webview.controller();
-                let _ = controller.SetIsVisible(visible);
-            }
-            #[cfg(not(windows))]
+/// 返回是否真正设置成功（控制器未就绪时返回 false，调用方可重试）。
+pub fn set_webview_rendering(app: &tauri::AppHandle, label: &str, visible: bool) -> bool {
+    let Some(win) = app.get_webview_window(label) else {
+        return false;
+    };
+    // with_webview 闭包无返回值，用共享标志记录是否真正设置成功（同 set_floating_memory_level）
+    let done = Arc::new(AtomicBool::new(false));
+    let done_cb = Arc::clone(&done);
+    let result = win.with_webview(move |webview| {
+        #[cfg(windows)]
+        unsafe {
+            let controller = webview.controller();
+            done_cb.store(controller.SetIsVisible(visible).is_ok(), Ordering::SeqCst);
+        }
+        #[cfg(not(windows))]
+        {
             let _ = visible;
-        });
-    }
+            done_cb.store(true, Ordering::SeqCst);
+        }
+    });
+    result.is_ok() && done.load(Ordering::SeqCst)
 }
 
-/// 显示主窗口（不存在则重建，对齐 tauri.conf.json 的 main 窗口配置；
-/// 正常流程窗口常驻，重建仅作兜底）。
+/// 显示主窗口（不存在则懒创建）。
+///
+/// 懒创建：启动时不建主窗口（tauri.conf.json 已移除），首次显示才创建，
+/// 启动阶段省掉一个常驻的隐藏渲染进程（50~100MB）。窗口创建后常驻，
+/// 之后隐藏/显示复用，不再销毁。
+///
+/// 重要：窗口不存在时的创建动作必须推迟到"普通事件循环轮次"执行——
+/// WebviewWindowBuilder::build 会被 Tauri 调度回主线程创建 WebView2 控制器；
+/// 若主线程此刻正卡在 WebView2 消息派发栈内（如悬浮窗 JS 触发 show_main 的
+/// invoke 处理中），同步建窗会挂死（复现：启动后直接双击悬浮窗呼出主界面 →
+/// 点不开，再点托盘整个程序卡死）。后台线程 + run_on_main_thread 让创建
+/// 发生在 WebView2 消息派发栈退栈之后的事件循环迭代里。
 pub fn show_main_window(app: &tauri::AppHandle) {
     if app.get_webview_window("main").is_none() {
-        tracing::warn!("show_main: main 窗口不存在，重建");
+        if MAIN_CREATING.swap(true, Ordering::SeqCst) {
+            return; // 已有创建任务在途，避免重复
+        }
+        let handle = app.clone();
+        std::thread::Builder::new()
+            .name("main-create".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(50)); // 等当前 IPC 回调退栈
+                let h = handle.clone();
+                if handle.run_on_main_thread(move || {
+                    MAIN_CREATING.store(false, Ordering::SeqCst);
+                    show_main_window_impl(&h);
+                }).is_err() {
+                    // 调度失败（如应用退出中）：复位标志，避免后续创建被永久屏蔽
+                    MAIN_CREATING.store(false, Ordering::SeqCst);
+                }
+            })
+            .expect("启动主窗口创建线程失败");
+        return;
+    }
+    show_main_window_impl(app);
+}
+
+/// show_main_window 实现体（窗口已存在，或已确保在普通事件循环轮次执行）。
+fn show_main_window_impl(app: &tauri::AppHandle) {
+    // 取消待执行的"隐藏后卸载页面"任务（线程唤醒后会在锁内再次确认）
+    MAIN_UNLOAD_ARMED.store(false, Ordering::SeqCst);
+    // 显示/隐藏代次 +1：让仍在等待恢复的旧线程放弃（见 restore_main_after_load）
+    MAIN_VIS_EPOCH.fetch_add(1, Ordering::SeqCst);
+
+    if app.get_webview_window("main").is_none() {
+        tracing::info!("show_main: 主窗口首次创建（懒创建）");
+        // 全新窗口：清理可能残留的卸载状态（正常流程窗口常驻，此处仅为兜底）
+        MAIN_UNLOADED.store(false, Ordering::SeqCst);
+        MAIN_UNLOAD_ARMED.store(false, Ordering::SeqCst);
+        *MAIN_URL.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let result = tauri::WebviewWindowBuilder::new(
             app,
             "main",
@@ -341,27 +432,61 @@ pub fn show_main_window(app: &tauri::AppHandle) {
         .min_inner_size(820.0, 560.0)
         .resizable(true)
         .visible(false)
+        .additional_browser_args(WEBVIEW_BROWSER_ARGS)
         .build();
         match &result {
-            Ok(_) => tracing::info!("show_main: 重建成功"),
-            Err(e) => tracing::error!("show_main: 重建失败: {e}"),
+            Ok(_) => tracing::info!("show_main: 主窗口创建成功"),
+            Err(e) => tracing::error!("show_main: 主窗口创建失败: {e}"),
         }
     }
-    if let Some(win) = app.get_webview_window("main") {
-        // 恢复 WebView2 渲染（隐藏时已停用），再显示窗口
-        set_webview_rendering(app, "main", true);
-        // 恢复任务栏按钮（隐藏时切走过）
-        let _ = win.set_skip_taskbar(false);
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-    }
+
     // 主窗口打开：立即触发一次重聚合，图表数据马上刷新（隐藏期间重聚合已停用）
     if let Some(state) = app.try_state::<Arc<AppState>>() {
         state.refresh_now.store(true, Ordering::Relaxed);
     }
     // 应用进入活跃状态：悬浮窗回到 Normal 内存档位
     set_floating_memory_level(app, false);
+
+    // 卸载/恢复决策与"隐藏后卸载"线程互斥，防止竞态：
+    // - 卸载线程拿锁后再次确认窗口仍隐藏才会导航 about:blank；
+    // - 这里拿锁后发现页面已被卸载，先导航回原页面、加载完成后再显示。
+    let _guard = MAIN_UNLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if MAIN_UNLOADED.swap(false, Ordering::SeqCst) {
+        if let Some(win) = app.get_webview_window("main") {
+            match MAIN_URL
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .and_then(|u| u.parse::<tauri::Url>().ok())
+            {
+                Some(u) => {
+                    let _ = win.navigate(u);
+                    // 加载完成前不显示，避免白屏；由恢复线程轮询后恢复渲染并显示
+                    restore_main_after_load(app);
+                    return;
+                }
+                None => tracing::warn!("show_main: 恢复 URL 无效，按普通路径显示"),
+            }
+        }
+    }
+    // 正常路径：恢复 WebView2 渲染（隐藏时已停用），再显示窗口。
+    // 页面仍为空白（about:blank，如恢复线程尚未完成）→ 等加载完成再显示。
+    let blank = app
+        .get_webview_window("main")
+        .map(|w| w.url().map(|u| u.as_str() == "about:blank").unwrap_or(false))
+        .unwrap_or(false);
+    if blank {
+        restore_main_after_load(app);
+        return;
+    }
+    set_webview_rendering(app, "main", true);
+    if let Some(win) = app.get_webview_window("main") {
+        // 恢复任务栏按钮（隐藏时切走过）
+        let _ = win.set_skip_taskbar(false);
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
 }
 
 /// 隐藏主窗口（到托盘）：仅隐藏，不销毁。
@@ -382,6 +507,114 @@ pub fn hide_main_window(app: &tauri::AppHandle) {
     }
     // 应用转入非活跃状态：悬浮窗降为 Low 内存档位
     set_floating_memory_level(app, true);
+    // 显示/隐藏代次 +1：让等待恢复的旧线程放弃（见 restore_main_after_load）
+    MAIN_VIS_EPOCH.fetch_add(1, Ordering::SeqCst);
+    // 隐藏超时后卸载主窗口页面（about:blank），释放页面 JS 堆/DOM 内存
+    arm_main_unload(app);
+}
+
+/// 主窗口隐藏后延时卸载页面（navigate about:blank），释放页面内存。
+/// 防抖：默认隐藏 60 秒后仍隐藏才卸载（config [gui] unload_hidden_delay，
+/// 最小 5 秒）；显示路径会置 MAIN_UNLOAD_ARMED=false 取消任务。
+/// 可通过 [gui] unload_hidden=false 关闭。
+fn arm_main_unload(app: &tauri::AppHandle) {
+    let config = focusflow_core::config::instance();
+    if !config.get_bool("gui", "unload_hidden", true) {
+        return;
+    }
+    // 已有任务在等待，不重复安排
+    if MAIN_UNLOAD_ARMED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let delay = config.get_int("gui", "unload_hidden_delay", 60).max(5) as u64;
+    let handle = app.clone();
+    std::thread::Builder::new()
+        .name("main-unload".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(delay));
+            // 显示路径会置 ARM=false 取消任务
+            if !MAIN_UNLOAD_ARMED.load(Ordering::SeqCst) {
+                return;
+            }
+            let Some(win) = handle.get_webview_window("main") else {
+                // 窗口尚不存在（懒创建前）：复位标志，允许后续重新安排卸载
+                MAIN_UNLOAD_ARMED.store(false, Ordering::SeqCst);
+                return;
+            };
+            let _guard = MAIN_UNLOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // 锁内最终确认：任务未被取消、窗口仍隐藏
+            if !MAIN_UNLOAD_ARMED.load(Ordering::SeqCst) || win.is_visible().unwrap_or(true) {
+                return;
+            }
+            let Ok(url) = win.url() else {
+                return;
+            };
+            // 记录原页面 URL（重新显示时导航回去），再卸载页面
+            *MAIN_URL.lock().unwrap_or_else(|e| e.into_inner()) = Some(url.to_string());
+            MAIN_UNLOADED.store(true, Ordering::SeqCst);
+            let _ = win.navigate(tauri::Url::parse("about:blank").unwrap());
+            tracing::info!("主窗口页面已卸载到 about:blank（释放页面内存）");
+        })
+        .expect("启动主窗口页面卸载线程失败");
+}
+
+/// 页面卸载后重新打开主窗口：轮询等待页面加载完成（最多 2 秒），
+/// 再恢复 WebView2 渲染并显示，避免白屏闪烁。
+/// 若等待期间又发生 hide/show（代次变化），放弃本次恢复，交给最新操作。
+fn restore_main_after_load(app: &tauri::AppHandle) {
+    let epoch = MAIN_VIS_EPOCH.load(Ordering::SeqCst);
+    let handle = app.clone();
+    std::thread::Builder::new()
+        .name("main-restore".into())
+        .spawn(move || {
+            let mut loaded = false;
+            // 最多等 10 秒（冷启动 WebView2 初始化可能很慢）；期间代次变化立即放弃
+            for _ in 0..200 {
+                if MAIN_VIS_EPOCH.load(Ordering::SeqCst) != epoch {
+                    return;
+                }
+                loaded = handle
+                    .get_webview_window("main")
+                    .map(|w| w.url().map(|u| u.as_str() != "about:blank").unwrap_or(false))
+                    .unwrap_or(false);
+                if loaded {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // 超时仍未加载：补一次导航兜底，避免 stuck 在 about:blank 白屏
+            if !loaded {
+                if let Some(win) = handle.get_webview_window("main") {
+                    let url = MAIN_URL
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if let Some(u) = url.and_then(|u| u.parse::<tauri::Url>().ok()) {
+                        let _ = win.navigate(u);
+                    }
+                }
+            }
+            // 显示前最终确认：代次未变、窗口仍隐藏（把 TOCTOU 窗口缩到最小）
+            if MAIN_VIS_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+            let Some(win) = handle.get_webview_window("main") else {
+                return;
+            };
+            if win.is_visible().unwrap_or(true) {
+                return;
+            }
+            set_webview_rendering(&handle, "main", true);
+            let _ = win.set_skip_taskbar(false);
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+            // 显示后复检代次：若期间用户又隐藏了窗口，立即收回去
+            if MAIN_VIS_EPOCH.load(Ordering::SeqCst) != epoch {
+                let _ = win.hide();
+            }
+        })
+        .expect("启动主窗口恢复线程失败");
 }
 
 /// 悬浮窗周期重申置顶（对齐 Python 版方案）：
@@ -522,6 +755,10 @@ fn spawn_stats_worker(
                 //   重聚合完全停掉，只在强制/周期切换时执行（打开窗口会触发强制刷新）。
                 let main_visible = app
                     .get_webview_window("main")
+                    .map(|w| w.is_visible().unwrap_or(false))
+                    .unwrap_or(false);
+                let floating_visible = app
+                    .get_webview_window("floating")
                     .map(|w| w.is_visible().unwrap_or(false))
                     .unwrap_or(false);
                 let heavy_interval_ms = if !main_visible {
@@ -665,7 +902,11 @@ fn spawn_stats_worker(
                         s.hourly.clone_from(&charts.hourly);
                         s.weekday.clone_from(&charts.weekday);
                     }
-                    let _ = app.emit("stats-charts", charts);
+                    // 图表数据仅主窗口使用：主窗口隐藏时跳过推送，
+                    // 避免每轮重聚合都唤醒隐藏的渲染进程（打开窗口时 refresh_now 会强制重聚合）
+                    if main_visible {
+                        let _ = app.emit_to("main", "stats-charts", charts);
+                    }
                 }
 
                 let today_count = cur_today;
@@ -700,16 +941,21 @@ fn spawn_stats_worker(
                 let live_changed =
                     today_count != prev_today_count || cpm != prev_cpm || period_val != prev_period;
                 if live_changed {
-                    let _ = app.emit(
-                        "stats-live",
-                        LiveStats {
-                            today_count,
-                            cpm,
-                            period: period_val,
-                            max_day,
-                            max_day_date,
-                        },
-                    );
+                    let live = LiveStats {
+                        today_count,
+                        cpm,
+                        period: period_val,
+                        max_day,
+                        max_day_date,
+                    };
+                    // 事件定向推送：只发给实际可见的窗口。
+                    // 隐藏的窗口渲染进程已停（SetIsVisible=false），不再被 500ms 事件唤醒。
+                    if floating_visible {
+                        let _ = app.emit_to("floating", "stats-live", &live);
+                    }
+                    if main_visible {
+                        let _ = app.emit_to("main", "stats-live", live);
+                    }
                 }
                 prev_today_count = today_count;
                 prev_cpm = cpm;

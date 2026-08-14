@@ -63,6 +63,97 @@ mod tests {
     }
 
     #[test]
+    fn accounting_view_widgets() {
+        // 新控件类型（select / modal_form / 分页按钮 disabled）解析回归测试
+        let _guard = guard();
+        let dir = std::env::current_dir().unwrap();
+        paths::set_app_dir(&dir);
+        db::queries::invalidate_years_cache();
+
+        let config: &'static FocusFlowConfig = Box::leak(Box::new(FocusFlowConfig::load(dir.join("config.ini")).unwrap()));
+        let database = db::Database::init_readonly();
+        let mut manager = PluginManager::new(config, database);
+
+        let files = manager.discover();
+        let file = files
+            .iter()
+            .find(|f| f.ends_with("accounting_plugin.lua"))
+            .expect("应发现 accounting_plugin.lua");
+        let name = manager.load_plugin(file).expect("加载记账本插件失败");
+        assert_eq!(name, "记账本");
+
+        let view = manager.get_plugin(&name).and_then(|p| p.view.clone()).expect("应有视图");
+        use focusflow_core::plugins::Widget;
+        let has_modal = view.widgets.iter().any(|w| {
+            matches!(
+                w,
+                Widget::ModalForm {
+                    submit,
+                    fields,
+                    ..
+                } if submit == "add_record" && !fields.is_empty()
+            )
+        });
+        assert!(has_modal, "记账本视图应包含新增记录的弹窗表单控件");
+        let has_edit_modal = view.widgets.iter().any(|w| {
+            matches!(w, Widget::ModalForm { id, .. } if id == "edit_modal")
+        });
+        assert!(has_edit_modal, "记账本视图应包含编辑记录弹窗");
+        // 递归查找（筛选控件在 Row 容器内）
+        fn find_widget(widgets: &[Widget], pred: impl Fn(&Widget) -> bool + Copy) -> bool {
+            widgets.iter().any(|w| {
+                if pred(w) {
+                    return true;
+                }
+                if let Widget::Row { children } = w {
+                    return find_widget(children, pred);
+                }
+                false
+            })
+        }
+        let has_cat_filter = find_widget(&view.widgets, |w| {
+            matches!(
+                w,
+                Widget::Select { field, refresh, .. } if field == "f_cat" && *refresh
+            )
+        });
+        assert!(has_cat_filter, "记账本视图应包含分类筛选下拉（联动刷新）");
+        let has_row = view.widgets.iter().any(|w| {
+            matches!(w, Widget::Row { children } if !children.is_empty())
+        });
+        assert!(has_row, "记账本视图应包含横向行容器（操作栏/筛选栏）");
+        let has_pager = view
+            .widgets
+            .iter()
+            .any(|w| matches!(w, Widget::Pager { page, .. } if *page >= 1));
+        assert!(has_pager, "记账本视图应包含分页条");
+        let has_table_ids = view.widgets.iter().any(|w| {
+            // ids 与 rows 平行（测试库为空时均为空，验证接线结构）
+            matches!(w, Widget::Table { ids, rows, .. } if ids.len() == rows.len())
+        });
+        assert!(has_table_ids, "记账本视图表格应包含记录 id（行选中用）");
+        let has_sel_button = find_widget(&view.widgets, |w| {
+            matches!(w, Widget::Button { id, sel, .. } if id == "edit_" && *sel)
+        });
+        assert!(has_sel_button, "记账本视图应包含选中行修改按钮（sel）");
+
+        // 回归：set_field 后视图必须刷新（否则出现"点了没反应"）
+        manager
+            .plugin_set_field(&name, "f_kw", "测试关键词")
+            .expect("set_field 应成功");
+        let view2 = manager.get_plugin(&name).and_then(|p| p.view.clone()).expect("应有视图");
+        let has_kw = find_widget(&view2.widgets, |w| {
+            matches!(
+                w,
+                Widget::TextInput { field, value, .. } if field == "f_kw" && value == "测试关键词"
+            )
+        });
+        assert!(has_kw, "set_field 后视图应刷新（关键词输入框回填新值）");
+
+        assert!(manager.unload_plugin(&name));
+    }
+
+    #[test]
     fn host_api_stats() {
         let _guard = guard();
         let dir = std::env::current_dir().unwrap();

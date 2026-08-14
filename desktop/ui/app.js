@@ -75,6 +75,14 @@ function applyCharts(s) {
   $("st-total").textContent = fmt(s.total);
   $("st-avg").textContent = fmt(s.avg);
   applyMax(s);
+  // 设置页不依赖图表数据：不随推送重建，避免整页 innerHTML 重建清空正在输入的内容
+  if (currentView === "settings") return;
+  if (currentView === "plugins") {
+    // 插件详情页需要周期性刷新（如番茄钟倒计时），renderPluginDetail 内部做了
+    // 代次防抖 + 内容比对，内容未变或输入中不会重建 DOM
+    if (openPluginName) renderPluginDetail();
+    return;
+  }
   renderCurrentView();
 }
 
@@ -173,24 +181,67 @@ function openPlugin(name) {
   renderPluginDetail();
 }
 
-async function renderPluginDetail() {
+// 插件详情页渲染的请求代次：丢弃乱序返回的陈旧响应
+let pluginDetailSeq = 0;
+
+async function renderPluginDetail(force) {
+  const seq = ++pluginDetailSeq;
   const box = $("view-plugins");
-  box.innerHTML = '<div class="empty">加载中…</div>';
+  let view;
   try {
-    const view = await invoke("get_plugin_view", { name: openPluginName });
-    if (!view) {
-      box.innerHTML = `<button class="btn ghost" onclick="closePlugin()">返回</button><div class="empty">插件未提供视图</div>`;
+    view = await invoke("get_plugin_view", { name: openPluginName });
+  } catch (e) {
+    if (seq !== pluginDetailSeq) return;
+    box.innerHTML = `<button class="btn ghost" onclick="closePlugin()">返回</button><div class="empty">加载失败: ${escapeHtml(e)}</div>`;
+    return;
+  }
+  // 已有更新的请求在途：丢弃本次陈旧响应（防乱序覆盖）
+  if (seq !== pluginDetailSeq) return;
+  if (!view) {
+    box.innerHTML = `<button class="btn ghost" onclick="closePlugin()">返回</button><div class="empty">插件未提供视图</div>`;
+    return;
+  }
+  let html = `<div style="margin-bottom:8px;"><button class="btn ghost" onclick="closePlugin()">← 返回插件列表</button>
+    <span style="margin-left:10px;font-weight:700;font-size:16px;">${escapeHtml(view.title || openPluginName)}</span></div><hr>`;
+  for (const w of view.widgets) {
+    html += renderWidget(w);
+  }
+  // 内容未变化：不重建 DOM，保留正在输入的内容与焦点（每 2s 图表推送也会触发刷新）
+  // 注意：行选中高亮（tr.sel）是运行时添加的 class，会破坏 innerHTML 相等比较，
+  // 因此比较前先移除高亮，重建后再按保存的选中集合恢复。
+  const prevSel = { ...pluginSelIds };
+  box.querySelectorAll("tr.sel").forEach((tr) => tr.classList.remove("sel"));
+  if (box.innerHTML === html) {
+    restoreSelClasses(box, prevSel);
+    return;
+  }
+  // 正在输入（焦点在框内输入控件）：跳过本次重建，失焦后下次刷新再更新。
+  // force=true（按钮动作/联动刷新）时强制重建，否则下拉联动会失效。
+  if (!force) {
+    const ae = document.activeElement;
+    if (ae && box.contains(ae) && (ae.tagName === "INPUT" || ae.tagName === "SELECT" || ae.tagName === "TEXTAREA")) {
       return;
     }
-    let html = `<div style="margin-bottom:8px;"><button class="btn ghost" onclick="closePlugin()">← 返回插件列表</button>
-      <span style="margin-left:10px;font-weight:700;font-size:16px;">${escapeHtml(view.title || openPluginName)}</span></div><hr>`;
-    for (const w of view.widgets) {
-      html += renderWidget(w);
-    }
-    box.innerHTML = html;
-  } catch (e) {
-    box.innerHTML = `<button class="btn ghost" onclick="closePlugin()">返回</button><div class="empty">加载失败: ${escapeHtml(e)}</div>`;
   }
+  box.innerHTML = html;
+  restoreSelClasses(box, prevSel); // 重建后恢复选中状态（高亮 + 集合）
+}
+
+// 重建后恢复表格选中行：按保存的分组集合重新加高亮 class 并同步选中集合
+function restoreSelClasses(box, groups) {
+  const next = {};
+  for (const g of Object.keys(groups || {})) {
+    const set = new Set();
+    (groups[g] || []).forEach((id) => {
+      const tr = box.querySelector(`tr[data-group="${g}"][data-rid="${id}"]`);
+      if (tr) {
+        tr.classList.add("sel");
+        set.add(id);
+      }
+    });
+    next[g] = set;
+  }
+  pluginSelIds = next;
 }
 
 function renderWidget(w) {
@@ -201,27 +252,198 @@ function renderWidget(w) {
       return `<h3 style="color:var(--accent);margin:12px 0 4px;">${escapeHtml(w.text)}</h3>`;
     case "keyvalue":
       return `<div class="setting-row"><span class="lbl">${escapeHtml(w.key)}</span><span style="font-weight:600;">${escapeHtml(w.value)}</span></div>`;
-    case "table":
-      return `<table class="grid" style="margin:8px 0;"><thead><tr>${(w.headers || []).map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${
-        (w.rows || []).map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`).join("")
-      }</tbody></table>`;
-    case "button":
-      return `<div style="margin:6px 0;"><button class="btn" onclick="pluginBtn('${escapeHtml(openPluginName)}','${escapeHtml(w.id)}')">${escapeHtml(w.text)}</button></div>`;
+    case "table": {
+      const hasActions = (w.ids && w.ids.length && w.actions && w.actions.length);
+      const selectable = (w.ids && w.ids.length);
+      const thead = (w.headers || []).map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+      const tbody = (w.rows || []).map((r, ri) => {
+        const cells = r.map((c) => `<td>${escapeHtml(c)}</td>`).join("");
+        let actionTd = "";
+        if (hasActions) {
+          const id = w.ids[ri];
+          // M5: stopPropagation 防止点击冒泡到 <tr onclick> 误切换选中
+          const btns = w.actions.map((a) => `<button class="btn ghost mini" onclick="event.stopPropagation();pluginBtn('${escapeHtml(openPluginName)}','${escapeHtml(a.prefix)}${id}')">${escapeHtml(a.text)}</button>`).join("");
+          actionTd = `<td class="row-actions">${btns}</td>`;
+        }
+        // 可选中行：点击切换选中（配合顶部 sel 按钮做修改/删除/距今）。
+        // 高亮只由 pluginSelectRow 运行时添加 class，不写进模板，
+        // 避免与 innerHTML 相等判断产生属性顺序差异导致误重建。
+        let rowAttrs = "";
+        if (selectable) {
+          const rawId = w.ids[ri];
+          const grp = escapeHtml(w.group || "");
+          const os = escapeHtml(w.onselect || "");
+          rowAttrs = ` data-rid="${String(rawId)}" data-group="${grp}" onclick="pluginSelectRow(this, '${grp}', '${String(rawId)}', '${os}')"`;
+        }
+        return `<tr${rowAttrs}>${cells}${actionTd}</tr>`;
+      }).join("");
+      return `<table class="grid" style="margin:8px 0;"><thead><tr>${thead}${hasActions ? "<th>操作</th>" : ""}</tr></thead><tbody>${tbody}</tbody></table>`;
+    }
+    case "button": {
+      let onclick;
+      if (w.modal) {
+        onclick = `modalOpen('${escapeHtml(w.modal)}')`;
+      } else if (w.sel) {
+        onclick = `pluginBtnSel('${escapeHtml(openPluginName)}','${escapeHtml(w.id)}','${escapeHtml(w.group || "")}')`;
+      } else {
+        onclick = `pluginBtn('${escapeHtml(openPluginName)}','${escapeHtml(w.id)}')`;
+      }
+      return `<div style="margin:6px 0;"><button class="btn" ${w.disabled ? "disabled" : ""} onclick="${onclick}">${escapeHtml(w.text)}</button></div>`;
+    }
     case "separator":
       return `<hr>`;
     case "textarea":
       return `<pre style="background:var(--accent-soft);padding:8px;border-radius:8px;white-space:pre-wrap;font-family:inherit;">${escapeHtml(w.text)}</pre>`;
     case "textinput":
-      return `<div class="setting-row"><span class="lbl">${escapeHtml(w.text)}</span><input type="text" onchange="pluginField('${escapeHtml(openPluginName)}','${escapeHtml(w.field)}',this.value)"></div>`;
+      return `<div class="setting-row"><span class="lbl">${escapeHtml(w.label || w.text || "")}</span><input type="text" value="${escapeHtml(w.value || "")}" onchange="pluginField('${escapeHtml(openPluginName)}','${escapeHtml(w.field)}',this.value)"></div>`;
+    case "select":
+      return `<div class="setting-row"><span class="lbl">${escapeHtml(w.label || w.text || "")}</span><select onchange="${w.refresh ? "pluginField" : "pluginFieldStay"}('${escapeHtml(openPluginName)}','${escapeHtml(w.field)}',this.value)">${(w.options || []).map((o) => `<option value="${escapeHtml(o.value)}" ${String(o.value) === String(w.value) ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}</select></div>`;
+    case "modal_form": {
+      // 弹窗表单：按钮（可选）打开模态框；字段变更写入插件状态（不重建页面），提交触发插件动作
+      const mid = w.id || "pf-modal-" + (w.field || Math.random().toString(36).slice(2, 8));
+      const fields = (w.fields || []).map((f) => pluginFieldHtml(f)).join("");
+      const innerWidgets = (w.children || []).map((c) => renderWidget(c)).join("");
+      const bodyHtml = (w.content ? `<pre class="modal-content">${escapeHtml(w.content)}</pre>` : "")
+        + fields
+        + innerWidgets
+        + ((w.actions && w.actions.length) ? `<div class="widget-row modal-actions">${w.actions.map((a) => `<button class="btn" onclick="modalAction('${escapeHtml(openPluginName)}','${escapeHtml(a.prefix)}','${mid}')">${escapeHtml(a.text)}</button>`).join("")}</div>` : "");
+      const isOpen = !!(w.open || openModals.has(mid));
+      return `<div class="plugin-modal">${w.text ? `<div style="margin:6px 0;"><button class="btn" onclick="modalOpen('${mid}')">${escapeHtml(w.text)}</button></div>` : ""}
+        <div class="modal-overlay" id="${mid}" style="display:${isOpen ? "flex" : "none"};" onclick="if (event.target === this) modalCancel('${escapeHtml(openPluginName)}','${escapeHtml(w.cancel || "")}','${mid}')">
+          <div class="modal-dialog">
+            <div class="modal-head"><span>${escapeHtml(w.title || w.text || "新增")}</span><button class="modal-close" onclick="modalCancel('${escapeHtml(openPluginName)}','${escapeHtml(w.cancel || "")}','${mid}')">✕</button></div>
+            <div class="modal-body">${bodyHtml}</div>
+            <div class="modal-foot">
+              <button class="btn ghost" onclick="modalCancel('${escapeHtml(openPluginName)}','${escapeHtml(w.cancel || "")}','${mid}')">取消</button>
+              <button class="btn" onclick="modalSubmit('${escapeHtml(openPluginName)}','${escapeHtml(w.submit)}','${mid}')">${escapeHtml(w.submit_text || "确定")}</button>
+            </div>
+          </div>
+        </div></div>`;
+    }
+    case "row":
+      return `<div class="widget-row">${(w.children || []).map((c) => renderWidget(c)).join("")}</div>`;
+    case "pager": {
+      const page = Number(w.page || 1), pages = Number(w.pages || 1), total = Number(w.total || 0);
+      return `<div class="pager"><button class="btn ghost" ${page <= 1 ? "disabled" : ""} onclick="pluginBtn('${escapeHtml(openPluginName)}','${escapeHtml(w.prev)}')">上一页</button>
+        <span>第 ${page} / ${pages} 页 · 共 ${total} 条</span>
+        <button class="btn ghost" ${page >= pages ? "disabled" : ""} onclick="pluginBtn('${escapeHtml(openPluginName)}','${escapeHtml(w.next)}')">下一页</button></div>`;
+    }
     default:
       return "";
   }
 }
 
+// 弹窗表单字段渲染（text / select / date）
+function pluginFieldHtml(f) {
+  const label = `<span class="lbl">${escapeHtml(f.label || f.text || "")}</span>`;
+  const fn = f.refresh ? "pluginField" : "pluginFieldStay";
+  const onchange = `${fn}('${escapeHtml(openPluginName)}','${escapeHtml(f.field)}',this.value)`;
+  if (f.kind === "select") {
+    return `<div class="setting-row">${label}<select onchange="${onchange}">${(f.options || []).map((o) => `<option value="${escapeHtml(o.value)}" ${String(o.value) === String(f.value) ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}</select></div>`;
+  }
+  if (f.kind === "date") {
+    return `<div class="setting-row">${label}<input type="date" value="${escapeHtml(f.value || "")}" onchange="${onchange}"></div>`;
+  }
+  return `<div class="setting-row">${label}<input type="text" value="${escapeHtml(f.value || "")}" onchange="${onchange}"></div>`;
+}
+
+// ===== 插件表格选中（按分组独立管理；无分组时沿用全局多选）=====
+// 选中集合：{ group: Set<id> }，group 为空串的条目合并到 "__main"
+let pluginSelIds = { "__main": new Set() };
+function selSet(group) {
+  const g = group || "__main";
+  if (!pluginSelIds[g]) pluginSelIds[g] = new Set();
+  return pluginSelIds[g];
+}
+function selAll() {
+  return Object.values(pluginSelIds).reduce((acc, s) => { s.forEach((v) => acc.add(v)); return acc; }, new Set());
+}
+function pluginSelectRow(tr, group, id, onselect) {
+  const key = String(id);
+  const set = selSet(group);
+  if (group) {
+    // 有分组：单选（同组内互斥）
+    if (set.has(key)) {
+      set.delete(key);
+      tr.classList.remove("sel");
+    } else {
+      set.clear();
+      set.add(key);
+      document.querySelectorAll(`tr[data-group="${group}"]`).forEach((t) => t.classList.remove("sel"));
+      tr.classList.add("sel");
+      // 联动：把选中项写入插件字段并刷新（如分类→刷新子分类列表）
+      if (onselect) {
+        pluginField(openPluginName, onselect, key);
+      }
+    }
+  } else {
+    // 无分组：多选切换（记账记录列表）
+    if (set.has(key)) {
+      set.delete(key);
+      tr.classList.remove("sel");
+    } else {
+      set.add(key);
+      tr.classList.add("sel");
+    }
+  }
+}
+// sel 按钮：动作 id 拼接选中 id 列表（如 "del_" + "42,43" → del_42,43）；
+// 修改仅支持单条
+async function pluginBtnSel(name, id, group) {
+  const set = selSet(group);
+  if (set.size === 0) {
+    alert("请先在列表中点击选中一项");
+    return;
+  }
+  if (id === "edit_" && set.size > 1) {
+    alert("修改仅支持选中一条记录");
+    return;
+  }
+  await pluginBtn(name, id + [...set].join(","));
+}
+
+// ===== 插件弹窗 =====
+// 已打开的弹窗集合：页面重建（如联动刷新）后弹窗保持打开
+const openModals = new Set();
+function modalOpen(id) {
+  openModals.add(id);
+  const m = document.getElementById(id);
+  if (m) m.style.display = "flex";
+}
+function modalClose(id) {
+  openModals.delete(id);
+  const m = document.getElementById(id);
+  if (m) m.style.display = "none";
+}
+// 表单字段变更：写入插件状态但不重建页面（保持弹窗与输入焦点不被打断）
+async function pluginFieldStay(name, field, value) {
+  try {
+    await invoke("plugin_set_field", { name, field, value });
+  } catch (e) {
+    console.error("插件输入失败", e);
+  }
+}
+// 弹窗提交：关闭弹窗 → 触发插件动作 → 刷新视图
+async function modalSubmit(name, id, modalId) {
+  modalClose(modalId);
+  await pluginBtn(name, id);
+}
+// 弹窗内自定义按钮（如分类管理操作）：触发插件动作但弹窗保持打开
+async function modalAction(name, id, modalId) {
+  await pluginBtn(name, id);
+  const m = document.getElementById(modalId);
+  if (m) m.style.display = "flex";
+}
+// 弹窗取消：关闭弹窗；若插件提供了 cancel 动作（如重置编辑状态），一并触发
+async function modalCancel(name, cancelId, modalId) {
+  modalClose(modalId);
+  if (cancelId) await pluginBtn(name, cancelId);
+}
+
 async function pluginBtn(name, id) {
   try {
     await invoke("plugin_action", { name, id });
-    await renderPluginDetail();
+    await renderPluginDetail(true);
   } catch (e) {
     alert("插件动作失败: " + e);
   }
@@ -230,7 +452,7 @@ async function pluginBtn(name, id) {
 async function pluginField(name, field, value) {
   try {
     await invoke("plugin_set_field", { name, field, value });
-    await renderPluginDetail();
+    await renderPluginDetail(true);
   } catch (e) {
     console.error("插件输入失败", e);
   }
@@ -238,6 +460,8 @@ async function pluginField(name, field, value) {
 
 function closePlugin() {
   openPluginName = null;
+  openModals.clear(); // 离开插件页：清空弹窗打开状态，避免重开时旧弹窗自动弹出
+  pluginSelIds = { "__main": new Set() };
   renderPlugins();
 }
 

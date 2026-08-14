@@ -347,8 +347,25 @@ impl PluginManager {
         Ok(ret)
     }
 
-    /// 调用插件按钮动作。
-    pub fn plugin_action(&self, name: &str, action_id: &str) -> Result<(), String> {
+    /// 重新执行 get_view() 并更新视图缓存。
+    /// 动作/输入回写会改变插件状态，前端拿到的视图必须是新鲜的，
+    /// 否则会出现"点了没反应"（如分页不切换）。
+    pub fn refresh_view(&mut self, name: &str) -> Result<(), String> {
+        let info = self.plugins.get(name).ok_or_else(|| format!("插件不存在: {name}"))?;
+        let lua = info.lua.as_ref().ok_or_else(|| format!("插件未加载: {name}"))?;
+        // 无 get_view 的插件没有视图，跳过
+        if lua.globals().get::<mlua::Function>("get_view").is_err() {
+            return Ok(());
+        }
+        let view = Self::read_view(lua).map_err(|e| format!("get_view() 失败: {e}"))?;
+        if let Some(p) = self.plugins.get_mut(name) {
+            p.view = Some(view);
+        }
+        Ok(())
+    }
+
+    /// 调用插件按钮动作（动作后刷新视图缓存）。
+    pub fn plugin_action(&mut self, name: &str, action_id: &str) -> Result<(), String> {
         let info = self.plugins.get(name).ok_or_else(|| format!("插件不存在: {name}"))?;
         let lua = info.lua.as_ref().ok_or_else(|| format!("插件未加载: {name}"))?;
         // 先检查是否有 on_action
@@ -356,6 +373,7 @@ impl PluginManager {
             let _: () = on_action
                 .call(action_id)
                 .map_err(|e| format!("on_action 失败: {e}"))?;
+            self.refresh_view(name)?;
             return Ok(());
         }
         Err("插件未定义 on_action".to_string())
@@ -376,14 +394,15 @@ impl PluginManager {
         }
     }
 
-    /// 调用插件 set_field(field, value)（输入框回传）。
-    pub fn plugin_set_field(&self, name: &str, field: &str, value: &str) -> Result<(), String> {
+    /// 调用插件 set_field(field, value)（输入框回传，随后刷新视图缓存）。
+    pub fn plugin_set_field(&mut self, name: &str, field: &str, value: &str) -> Result<(), String> {
         let info = self.plugins.get(name).ok_or_else(|| format!("插件不存在: {name}"))?;
         let lua = info.lua.as_ref().ok_or_else(|| format!("插件未加载: {name}"))?;
         if let Ok(set_field) = lua.globals().get::<mlua::Function>("set_field") {
             let _: () = set_field
                 .call((field, value))
                 .map_err(|e| format!("set_field 失败: {e}"))?;
+            self.refresh_view(name)?;
             return Ok(());
         }
         Err("插件未定义 set_field".to_string())
@@ -431,10 +450,24 @@ fn hot_reload_loop(dir: PathBuf, tx: mpsc::Sender<String>, stop: Arc<AtomicBool>
     }
 }
 
+/// 解析 Lua 表的 options 数组为 (value, label) 列表。
+fn parse_options(t: &mlua::Table) -> mlua::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    if let Ok(opts) = t.get::<mlua::Table>("options") {
+        for (_, o) in opts.pairs::<mlua::Value, mlua::Table>().flatten() {
+            out.push((
+                o.get::<String>("value").unwrap_or_default(),
+                o.get::<String>("label").unwrap_or_default(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// 解析 Lua 表为声明式控件。
 fn parse_widget(w: &mlua::Table) -> mlua::Result<crate::plugins::Widget> {
     let wtype: String = w.get("type")?;
-    use crate::plugins::Widget;
+    use crate::plugins::{FormField, Widget};
     match wtype.as_str() {
         "label" => Ok(Widget::Label(w.get("text").unwrap_or_default())),
         "heading" => Ok(Widget::Heading(w.get("text").unwrap_or_default())),
@@ -446,11 +479,86 @@ fn parse_widget(w: &mlua::Table) -> mlua::Result<crate::plugins::Widget> {
         "textarea" => Ok(Widget::TextArea(w.get("text").unwrap_or_default())),
         "textinput" => Ok(Widget::TextInput {
             field: w.get("field").unwrap_or_default(),
-            label: w.get("label").unwrap_or_default(),
+            label: w.get("label").or_else(|_| w.get("text")).unwrap_or_default(),
+            value: w.get("value").unwrap_or_default(),
         }),
         "button" => Ok(Widget::Button {
             id: w.get("id").unwrap_or_default(),
             text: w.get("text").unwrap_or_default(),
+            disabled: w.get("disabled").unwrap_or(false),
+            modal: w.get::<Option<String>>("modal").unwrap_or(None),
+            sel: w.get("sel").unwrap_or(false),
+            group: w.get("group").unwrap_or_default(),
+        }),
+        "select" => Ok(Widget::Select {
+            field: w.get("field").unwrap_or_default(),
+            label: w.get("label").or_else(|_| w.get("text")).unwrap_or_default(),
+            value: w.get("value").unwrap_or_default(),
+            options: parse_options(w)?,
+            refresh: w.get("refresh").unwrap_or(false),
+        }),
+        "modal_form" => {
+            let mut fields = Vec::new();
+            if let Ok(fields_val) = w.get::<mlua::Table>("fields") {
+                for (_, f) in fields_val.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    fields.push(FormField {
+                        kind: f.get("kind").unwrap_or_else(|_| "text".into()),
+                        field: f.get("field").unwrap_or_default(),
+                        label: f.get("label").unwrap_or_default(),
+                        value: f.get("value").unwrap_or_default(),
+                        options: parse_options(&f)?,
+                    });
+                }
+            }
+            // 弹窗内自定义操作按钮（(动作 id, 文字)）
+            let mut buttons = Vec::new();
+            if let Ok(btns_val) = w.get::<mlua::Table>("buttons") {
+                for (_, b) in btns_val.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    buttons.push((
+                        b.get::<String>("id").unwrap_or_default(),
+                        b.get::<String>("text").unwrap_or_default(),
+                    ));
+                }
+            }
+            // 弹窗主体内嵌控件（表格等）
+            let mut widgets = Vec::new();
+            if let Ok(ws_val) = w.get::<mlua::Table>("widgets") {
+                for (_, c) in ws_val.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    if let Ok(widget) = parse_widget(&c) {
+                        widgets.push(widget);
+                    }
+                }
+            }
+            Ok(Widget::ModalForm {
+                id: w.get("id").unwrap_or_default(),
+                title: w.get("title").unwrap_or_default(),
+                submit: w.get("submit").unwrap_or_default(),
+                submit_text: w.get("submit_text").unwrap_or_default(),
+                cancel: w.get("cancel").unwrap_or_default(),
+                content: w.get("content").unwrap_or_default(),
+                open: w.get("open").unwrap_or(false),
+                fields,
+                buttons,
+                widgets,
+            })
+        }
+        "row" => {
+            let mut children = Vec::new();
+            if let Ok(children_val) = w.get::<mlua::Table>("children") {
+                for (_, c) in children_val.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    if let Ok(widget) = parse_widget(&c) {
+                        children.push(widget);
+                    }
+                }
+            }
+            Ok(Widget::Row { children })
+        }
+        "pager" => Ok(Widget::Pager {
+            page: w.get("page").unwrap_or(1),
+            pages: w.get("pages").unwrap_or(1),
+            total: w.get("total").unwrap_or(0),
+            prev_id: w.get("prev").unwrap_or_default(),
+            next_id: w.get("next").unwrap_or_default(),
         }),
         "table" => {
             let headers: Vec<String> = w.get("headers").unwrap_or_default();
@@ -466,7 +574,34 @@ fn parse_widget(w: &mlua::Table) -> mlua::Result<crate::plugins::Widget> {
                     rows.push(cols);
                 }
             }
-            Ok(Widget::Table { headers, rows })
+            let ids: Vec<String> = w
+                .get::<Vec<mlua::Value>>("ids")
+                .unwrap_or_default()
+                .iter()
+                .map(|v| match v {
+                    mlua::Value::Integer(n) => n.to_string(),
+                    mlua::Value::String(s) => s.to_string_lossy().to_string(),
+                    mlua::Value::Number(f) => (*f as i64).to_string(),
+                    _ => v.to_string().unwrap_or_default(),
+                })
+                .collect();
+            let mut actions = Vec::new();
+            if let Ok(actions_val) = w.get::<mlua::Table>("actions") {
+                for (_, a) in actions_val.pairs::<mlua::Value, mlua::Table>().flatten() {
+                    actions.push((
+                        a.get::<String>("prefix").unwrap_or_default(),
+                        a.get::<String>("text").unwrap_or_default(),
+                    ));
+                }
+            }
+            Ok(Widget::Table {
+                headers,
+                rows,
+                ids,
+                actions,
+                group: w.get("group").unwrap_or_default(),
+                onselect: w.get("onselect").unwrap_or_default(),
+            })
         }
         _ => Ok(Widget::Label(format!("[未知控件: {wtype}]"))),
     }

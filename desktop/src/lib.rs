@@ -26,8 +26,25 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // 已有实例在运行时再次启动 exe：聚焦并显示主窗口，第二个进程自行退出
-            crate::state::show_main_window(app);
+            // 已有实例在运行时再次启动 exe：聚焦并显示主窗口，第二个进程自行退出。
+            // 首个实例可能仍在启动阶段（AppState 尚未 manage）：延迟到就绪后再显示，
+            // 避免启动早期在主线程建窗/阻塞 WebView2 初始化。
+            let handle = app.clone();
+            std::thread::Builder::new()
+                .name("single-instance-delay".into())
+                .spawn(move || {
+                    for _ in 0..50 {
+                        if handle.try_state::<Arc<crate::state::AppState>>().is_some() {
+                            let h = handle.clone();
+                            let _ = handle
+                                .run_on_main_thread(move || crate::state::show_main_window(&h));
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    tracing::warn!("单实例回调：AppState 长时间未就绪，放弃显示");
+                })
+                .expect("启动单实例延迟线程失败");
         }))
         .setup(|app| {
             // 初始化数据库、监听器、统计线程（复用 focusflow-core）

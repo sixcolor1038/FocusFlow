@@ -39,6 +39,17 @@ document.addEventListener("mouseup", () => {
   }
 });
 
+// 窗口隐藏/失焦时复位拖动状态：隐藏期间收不到 mouseup，若残留 isDown，
+// 重开后 mousemove 会用陈旧坐标把窗口搬走（跳位）
+function resetDrag() {
+  isDown = false;
+  drag = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) resetDrag();
+});
+window.addEventListener("blur", () => resetDrag());
+
 // 双击打开主界面
 document.addEventListener("dblclick", () => {
   invoke("show_main");

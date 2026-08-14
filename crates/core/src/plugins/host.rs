@@ -270,7 +270,7 @@ pub fn register_host_api(
     let _ = accounting::init_db();
 
     let acc_add = lua.create_function(
-        |_, (rtype, item, store, date, amount, cat, sub): (String, String, String, String, f64, String, String)| {
+        |_, (rtype, item, store, date, amount, cat, sub, note): (String, String, String, String, f64, String, String, String)| {
             Ok(accounting::add_expense(
                 &rtype,
                 &item,
@@ -279,14 +279,244 @@ pub fn register_host_api(
                 amount,
                 if cat.is_empty() { None } else { Some(cat.as_str()) },
                 if sub.is_empty() { None } else { Some(sub.as_str()) },
-                None,
+                if note.is_empty() { None } else { Some(note.as_str()) },
             ))
         },
     )?;
     host.set("accounting_add", acc_add)?;
 
+    // 分页 + 筛选查询：返回 (records, total)
+    let acc_query = lua.create_function(
+        |lua,
+         (page, page_size, cat, sub, kw, date_from, date_to): (
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )| {
+            let (records, total) = accounting::get_expenses_page(
+                page,
+                page_size,
+                if cat.is_empty() { None } else { Some(cat.as_str()) },
+                if sub.is_empty() { None } else { Some(sub.as_str()) },
+                if kw.is_empty() { None } else { Some(kw.as_str()) },
+                if date_from.is_empty() { None } else { Some(date_from.as_str()) },
+                if date_to.is_empty() { None } else { Some(date_to.as_str()) },
+            );
+            let t = lua.create_table()?;
+            for (i, e) in records.iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("id", e.id)?;
+                row.set("type", e.rtype.as_str())?;
+                row.set("item", e.item_name.as_str())?;
+                row.set("store", e.store.clone().unwrap_or_default())?;
+                row.set("date", e.purchase_date.as_str())?;
+                row.set("amount", e.amount)?;
+                row.set("category", e.category.clone().unwrap_or_default())?;
+                row.set("subcategory", e.subcategory.clone().unwrap_or_default())?;
+                row.set("note", e.note.clone().unwrap_or_default())?;
+                t.set(i + 1, row)?;
+            }
+            Ok((t, total))
+        },
+    )?;
+    host.set("accounting_query", acc_query)?;
+
+    // 分类列表（名字数组）
+    let acc_cats = lua.create_function(|lua, ()| {
+        let cats = accounting::get_all_categories();
+        let t = lua.create_table()?;
+        for (i, c) in cats.iter().enumerate() {
+            t.set(i + 1, c.name.as_str())?;
+        }
+        Ok(t)
+    })?;
+    host.set("accounting_categories", acc_cats)?;
+
+    // 分类管理：添加分类（返回 id，失败 -1）
+    let acc_cat_add = lua.create_function(
+        |_, (name, ctype): (String, String)| Ok(accounting::add_category(&name, &ctype, &[])),
+    )?;
+    host.set("accounting_category_add", acc_cat_add)?;
+
+    // 重命名分类（同步历史记录）：(ok, msg)；第三个参数修改类型，空串表示保持原类型
+    let acc_cat_rename = lua.create_function(
+        |_, (old_name, new_name, ctype): (String, String, String)| {
+            let ctype = if ctype.is_empty() { None } else { Some(ctype.as_str()) };
+            Ok(accounting::update_category(&old_name, &new_name, ctype))
+        },
+    )?;
+    host.set("accounting_category_rename", acc_cat_rename)?;
+
+    // 修改分类类型：(ok, msg)
+    let acc_cat_type = lua.create_function(
+        |_, (name, ctype): (String, String)| {
+            let ok = accounting::update_category_type(&name, &ctype);
+            Ok((ok, if ok { "更新成功".to_string() } else { "更新失败".to_string() }))
+        },
+    )?;
+    host.set("accounting_category_type", acc_cat_type)?;
+
+    // 删除分类：(ok, msg)
+    let acc_cat_del = lua.create_function(
+        |_, name: String| Ok(accounting::delete_category(&name)),
+    )?;
+    host.set("accounting_category_delete", acc_cat_del)?;
+
+    // 查询分类类型（expense/income/both），无则空串
+    let acc_cat_type = lua.create_function(
+        |_, name: String| Ok(accounting::category_type(&name).unwrap_or_default()),
+    )?;
+    host.set("accounting_category_type", acc_cat_type)?;
+
+    // 添加子分类：(ok, msg)
+    let acc_sub_add = lua.create_function(
+        |_, (cat, sub): (String, String)| Ok(accounting::add_subcategory(&cat, &sub)),
+    )?;
+    host.set("accounting_subcategory_add", acc_sub_add)?;
+
+    // 重命名子分类：(ok, msg)
+    let acc_sub_rename = lua.create_function(
+        |_, (cat, old_sub, new_sub): (String, String, String)| {
+            Ok(accounting::update_subcategory(&cat, &old_sub, &new_sub))
+        },
+    )?;
+    host.set("accounting_subcategory_rename", acc_sub_rename)?;
+
+    // 删除子分类：(ok, msg)
+    let acc_sub_del = lua.create_function(
+        |_, (cat, sub): (String, String)| Ok(accounting::delete_subcategory(&cat, &sub)),
+    )?;
+    host.set("accounting_subcategory_delete", acc_sub_del)?;
+
+    // 子分类列表
+    let acc_subs = lua.create_function(|lua, cat: String| {
+        let subs = accounting::get_subcategories(&cat);
+        let t = lua.create_table()?;
+        for (i, s) in subs.iter().enumerate() {
+            t.set(i + 1, s.as_str())?;
+        }
+        Ok(t)
+    })?;
+    host.set("accounting_subcategories", acc_subs)?;
+
+    // 按 id 查询
+    let acc_get = lua.create_function(|lua, id: i64| {
+        let Some(e) = accounting::get_expense_by_id(id) else {
+            return Ok(mlua::Value::Nil);
+        };
+        let row = lua.create_table()?;
+        row.set("id", e.id)?;
+        row.set("type", e.rtype.as_str())?;
+        row.set("item", e.item_name.as_str())?;
+        row.set("store", e.store.clone().unwrap_or_default())?;
+        row.set("date", e.purchase_date.as_str())?;
+        row.set("amount", e.amount)?;
+        row.set("category", e.category.clone().unwrap_or_default())?;
+        row.set("subcategory", e.subcategory.clone().unwrap_or_default())?;
+        row.set("note", e.note.clone().unwrap_or_default())?;
+        Ok(mlua::Value::Table(row))
+    })?;
+    host.set("accounting_get", acc_get)?;
+
+    // 更新记录（含渠道/子分类/备注）
+    let acc_update = lua.create_function(
+        |_, (id, rtype, item, store, date, amount, cat, sub, note): (
+            i64,
+            String,
+            String,
+            String,
+            String,
+            f64,
+            String,
+            String,
+            String,
+        )| {
+            let e = accounting::Expense {
+                id,
+                rtype,
+                item_name: item,
+                store: if store.is_empty() { None } else { Some(store) },
+                purchase_date: date,
+                amount,
+                category: if cat.is_empty() { None } else { Some(cat) },
+                subcategory: if sub.is_empty() { None } else { Some(sub) },
+                delivery_date: None,
+                record_time: String::new(),
+                note: if note.is_empty() { None } else { Some(note) },
+            };
+            Ok(accounting::update_expense(id, &e))
+        },
+    )?;
+    host.set("accounting_update", acc_update)?;
+
+    // 月度汇总（含分类明细）：返回 (支出, 收入, 条数, [{category, net}])
+    let acc_monthly = lua.create_function(|lua, ym: String| {
+        let (expense, income, count, cat_stats) = accounting::monthly_summary_detail(&ym);
+        let t = lua.create_table()?;
+        for (i, (cat, net)) in cat_stats.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("category", cat.as_str())?;
+            row.set("net", *net)?;
+            t.set(i + 1, row)?;
+        }
+        Ok((expense, income, count, t))
+    })?;
+    host.set("accounting_monthly_detail", acc_monthly)?;
+
+    // 分类盈亏：返回 [{category, invested, earned, count}]
+    let acc_cat_profit = lua.create_function(|lua, ()| {
+        let data = accounting::category_profit_loss();
+        let t = lua.create_table()?;
+        for (i, (cat, inv, earn, cnt)) in data.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("category", cat.as_str())?;
+            row.set("invested", *inv)?;
+            row.set("earned", *earn)?;
+            row.set("count", *cnt)?;
+            t.set(i + 1, row)?;
+        }
+        Ok(t)
+    })?;
+    host.set("accounting_category_profit", acc_cat_profit)?;
+
+    // 细分盈亏：返回 [{subcategory, invested, earned, count}]
+    let acc_sub_profit = lua.create_function(|lua, cat: String| {
+        let data = accounting::subcategory_profit_loss(&cat);
+        let t = lua.create_table()?;
+        for (i, (sub, inv, earn, cnt)) in data.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("subcategory", sub.as_str())?;
+            row.set("invested", *inv)?;
+            row.set("earned", *earn)?;
+            row.set("count", *cnt)?;
+            t.set(i + 1, row)?;
+        }
+        Ok(t)
+    })?;
+    host.set("accounting_subcategory_profit", acc_sub_profit)?;
+
+    // 距今多久：入参 id 数组，返回 [{id, years, days}]
+    let acc_days_ago = lua.create_function(|lua, ids: Vec<i64>| {
+        let data = accounting::days_ago(&ids);
+        let t = lua.create_table()?;
+        for (i, (id, years, days)) in data.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("id", *id)?;
+            row.set("years", *years)?;
+            row.set("days", *days)?;
+            t.set(i + 1, row)?;
+        }
+        Ok(t)
+    })?;
+    host.set("accounting_days_ago", acc_days_ago)?;
+
     let acc_list = lua.create_function(|lua, limit: i64| {
-        let expenses = accounting::get_all_expenses(limit.clamp(1, 500));
+        // 上限放宽到 10000：记账本分页/查询需要全量记录（Lua 侧过滤 + 分页）
+        let expenses = accounting::get_all_expenses(limit.clamp(1, 10000));
         let t = lua.create_table()?;
         for (i, e) in expenses.iter().enumerate() {
             let row = lua.create_table()?;

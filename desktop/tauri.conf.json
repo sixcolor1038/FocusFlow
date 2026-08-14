@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FocusFlow",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "com.focusflow.desktop",
   "build": {
     "frontendDist": "ui"
@@ -9,17 +9,6 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      {
-        "label": "main",
-        "title": "FocusFlow - 效率追踪器",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 820,
-        "minHeight": 560,
-        "resizable": true,
-        "visible": false,
-        "url": "index.html"
-      },
       {
         "label": "floating",
         "title": "FocusFlow 悬浮窗",
@@ -32,7 +21,8 @@
         "skipTaskbar": true,
         "focus": true,
         "visible": false,
-        "url": "floating.html"
+        "url": "floating.html",
+        "additionalBrowserArgs": "--disable-background-networking --disable-component-update --no-first-run --disable-domain-reliability --disable-features=MediaRouter"
       }
     ],
     "security": {
