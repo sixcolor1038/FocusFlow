@@ -138,6 +138,11 @@ impl DbWriter {
         self.state.today_count.load(Ordering::Relaxed)
     }
 
+    /// 是否有未落库的增量（重聚合前判断是否需要先 flush）。
+    pub fn has_pending(&self) -> bool {
+        !self.state.agg.lock().unwrap().is_empty()
+    }
+
     /// 重置今日计数缓存（外部清除数据后调用）。
     pub fn reset_today_count(&self) {
         self.state.today_count.store(0, Ordering::Relaxed);

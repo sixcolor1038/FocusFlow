@@ -20,8 +20,8 @@ pub const APP_NAME: &str = "FocusFlow";
 pub const APP_DISPLAY_NAME: &str = "FocusFlow - 效率追踪器";
 /// 应用描述
 pub const APP_DESCRIPTION: &str = "FocusFlow - 效率与专注力分析工具";
-/// 版本号（后续从 Cargo 包版本自动生成）
-pub const APP_VERSION: &str = "0.3.0";
+/// 版本号：从 Cargo 包版本自动生成（focusflow-core 使用 workspace 版本）。
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 进程级 app_dir 覆盖（测试/部署指定数据目录用）。
 ///

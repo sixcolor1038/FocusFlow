@@ -114,9 +114,15 @@ impl PluginManager {
     /// 从 Lua 脚本读取元数据（不执行 init）。
     fn read_meta(&self, path: &Path) -> Result<PluginMeta, String> {
         let lua = Lua::new();
+        // 只注册空的 focusflow 占位表，避免扫描阶段触发宿主单例副作用；
+        // 真正的宿主 API 在 load_plugin 时才注册。
+        {
+            let placeholder = lua.create_table().map_err(|e| e.to_string())?;
+            lua.globals()
+                .set("focusflow", placeholder)
+                .map_err(|e| e.to_string())?;
+        }
         let script = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let _ = host::register_host_api(&lua, self.config, Arc::clone(&self.db))
-            .map_err(|e| format!("宿主 API 注册失败: {e}"))?;
         lua.load(&script)
             .set_name(path.file_name().and_then(|n| n.to_str()).unwrap_or("plugin"))
             .exec()

@@ -25,6 +25,8 @@ function switchView(view) {
     const el = $("view-" + id);
     if (el) el.style.display = id === view ? "" : "none";
   });
+  // 插件管理页打开/关闭时切换热重载监听（打开才扫描，平时零后台开销）
+  invoke("plugins_watch", { watch: view === "plugins" }).catch(() => {});
   renderCurrentView();
 }
 
@@ -43,6 +45,14 @@ function renderCurrentView() {
 }
 
 // ===== 统计快照 =====
+// 最高单日卡片：今日周期显示"历史最高"作对比目标，其余周期显示窗口内最高单日。
+// 日期一律显示完整 (YYYY-MM-DD)，跨年无歧义。
+function applyMax(s) {
+  $("st-max-label").textContent = s.period === -1 ? "历史最高" : "最高单日";
+  $("st-max").textContent = fmt(s.max_day);
+  $("st-max-date").textContent = s.max_day_date ? "(" + s.max_day_date + ")" : "";
+}
+
 // 轻量数据：今日/速度/周期（高频推送）
 function applyLive(s) {
   $("st-today").textContent = fmt(s.today_count);
@@ -55,6 +65,8 @@ function applyLive(s) {
   document.querySelectorAll("#period-tabs .tab").forEach((b) => {
     b.classList.toggle("active", Number(b.dataset.period) === s.period);
   });
+
+  applyMax(s);
 }
 
 // 重量数据：图表/排行（低频推送，变化才更新）
@@ -62,7 +74,7 @@ function applyCharts(s) {
   chartsData = s;
   $("st-total").textContent = fmt(s.total);
   $("st-avg").textContent = fmt(s.avg);
-  $("st-max").textContent = fmt(s.max_day);
+  applyMax(s);
   renderCurrentView();
 }
 
@@ -349,7 +361,8 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // ===== 事件绑定与启动 =====
@@ -380,10 +393,25 @@ document.querySelectorAll("#trend-days .tab").forEach((b) => {
   } catch (e) {
     console.error("读取主题失败", e);
   }
-  $("version").textContent = "FocusFlow v0.3.0";
+  // 版本号从后端单一来源读取（Cargo 包版本），失败时用默认占位
+  try {
+    const v = await invoke("get_version");
+    $("version").textContent = v ? "FocusFlow v" + v : "";
+  } catch (e) {
+    $("version").textContent = "";
+  }
   try {
     await listen("stats-live", (e) => applyLive(e.payload));
     await listen("stats-charts", (e) => applyCharts(e.payload));
+    // 插件热重载完成 → 若停在插件管理页则刷新列表
+    await listen("plugins-reloaded", () => {
+      if (currentView === "plugins") renderPlugins();
+    });
+    // 暂停状态在托盘/命令任意入口改变时即时同步设置页勾选
+    await listen("pause-changed", (e) => {
+      const cb = $("set-paused");
+      if (cb) cb.checked = !!e.payload;
+    });
   } catch (e) {
     console.error("事件订阅失败", e);
   }

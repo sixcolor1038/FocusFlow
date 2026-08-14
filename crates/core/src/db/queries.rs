@@ -308,6 +308,34 @@ pub fn get_stats_by_date(target_date: chrono::NaiveDate) -> (i64, HashMap<String
     result.flatten().unwrap_or((0, HashMap::new()))
 }
 
+/// 全历史最高单日（跨年度库）：返回 (YYYY-MM-DD, 次数)。无数据时返回 None。
+pub fn get_alltime_max_day() -> Option<(String, i64)> {
+    let mut best: Option<(i64, i64)> = None; // (date_key, count)
+    for year in available_years() {
+        let path = paths::year_db_path(year);
+        if let Some((dk, c)) = connection::with_ro_conn(&path, |conn| {
+            if !table_exists(conn, "daily_counts") {
+                return None;
+            }
+            conn.query_row(
+                "SELECT date_key, count FROM daily_counts ORDER BY count DESC, date_key ASC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .ok()
+        })
+        .flatten()
+        {
+            if best.map_or(true, |(_, bc)| c > bc) {
+                best = Some((dk, c));
+            }
+        }
+    }
+    best.and_then(|(dk, c)| {
+        day_key_to_date(dk).map(|d| (d.format("%Y-%m-%d").to_string(), c))
+    })
+}
+
 /// 查询最近 N 天每日按键数：返回 [(YYYY-MM-DD, 次数)]。
 pub fn get_daily_counts(days: i64, year: Option<i32>) -> Vec<(String, i64)> {
     let now = Local::now();

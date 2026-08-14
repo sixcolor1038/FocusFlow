@@ -111,3 +111,65 @@ pub fn export_html(path: &std::path::Path, total: i64, stats: &HashMap<String, i
     );
     std::fs::write(path, html).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn sample_stats() -> HashMap<String, i64> {
+        let mut m = HashMap::new();
+        m.insert("A".to_string(), 40);
+        m.insert("B".to_string(), 10);
+        m.insert("鼠标左键".to_string(), 30);
+        m
+    }
+
+    #[test]
+    fn export_csv_has_bom_header_and_rows() {
+        let dir = std::env::temp_dir().join("ff_export_test");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("out.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let ok = export_csv(&path, 80, &sample_stats());
+        assert!(ok, "export_csv should succeed");
+        let data = std::fs::read(&path).unwrap();
+        // 带 UTF-8 BOM
+        assert_eq!(&data[0..3], b"\xef\xbb\xbf", "CSV should have BOM");
+        let text = String::from_utf8_lossy(&data[3..]);
+        assert!(text.contains("总活跃次数 80"), "should contain total: {text}");
+        assert!(text.contains("排名,键鼠,次数,占比(%)"), "should contain header");
+        // 排行按次数降序：A(40) 应排第一
+        let a_pos = text.find("1,A,40").expect("rank1 A 40");
+        assert!(a_pos > 0);
+        assert!(text.contains("鼠标左键"), "should contain中文键名");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_html_contains_stats() {
+        let dir = std::env::temp_dir().join("ff_export_test2");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("out.html");
+        let _ = std::fs::remove_file(&path);
+
+        let ok = export_html(&path, 80, &sample_stats());
+        assert!(ok, "export_html should succeed");
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(html.contains("总活跃次数：80"), "should contain total");
+        assert!(html.contains("<html"), "should be html");
+        assert!(html.contains("50.00%"), "A 占比 40/80 = 50.00%");
+        assert!(html.contains("12.50%"), "B 占比 10/80 = 12.50%");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn thousands_formatter() {
+        assert_eq!(fmt_thousands(0), "0");
+        assert_eq!(fmt_thousands(1000), "1,000");
+        assert_eq!(fmt_thousands(1234567), "1,234,567");
+        assert_eq!(fmt_thousands(-500), "-500");
+    }
+}
+

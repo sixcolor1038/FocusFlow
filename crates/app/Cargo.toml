@@ -1,19 +1,19 @@
 [package]
 name = "focusflow-app"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
 
 [build-dependencies]
 winres = "0.1"
 
 [dependencies]
 focusflow-core = { path = "../core" }
-tokio.workspace = true
-tracing.workspace = true
-chrono.workspace = true
-serde.workspace = true
-anyhow.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal"] }
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
 
 # GUI: egui / eframe（即时模式，中文需捆绑字体）
 eframe = { version = "0.36", features = ["default_fonts", "persistence", "wayland", "x11"] }

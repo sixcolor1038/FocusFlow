@@ -158,7 +158,9 @@ fn toggle_floating(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("floating") {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
+            crate::state::set_webview_rendering(app, "floating", false);
         } else {
+            crate::state::set_webview_rendering(app, "floating", true);
             let _ = win.show();
             let _ = win.set_focus();
         }

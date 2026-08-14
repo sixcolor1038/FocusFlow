@@ -2,13 +2,20 @@
 resolver = "2"
 members = [
     "crates/core",
-    "crates/app",
     "crates/cli",
     "desktop",
 ]
 
+# 遗留的 egui 版 GUI（crates/app）：已由 desktop(Tauri) 取代，保留源码作参考。
+# 从 workspace 排除，避免默认构建/全量 check 重复编译旧 GUI。
+# 注意：作为独立 crate 构建需额外联网解析依赖（独立 Cargo.lock），
+# 日常开发/打包不需要，建议以 desktop(Tauri) 为准。
+exclude = [
+    "crates/app",
+]
+
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 

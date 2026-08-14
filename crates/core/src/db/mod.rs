@@ -13,8 +13,8 @@ use std::time::Duration;
 use chrono::Datelike;
 
 pub use queries::{
-    available_years, get_daily_counts, get_hourly_stats, get_stats, get_stats_by_date,
-    get_today_count, get_weekday_stats, invalidate_years_cache,
+    available_years, get_alltime_max_day, get_daily_counts, get_hourly_stats, get_stats,
+    get_stats_by_date, get_today_count, get_weekday_stats, invalidate_years_cache,
 };
 pub use writer::DbWriter;
 

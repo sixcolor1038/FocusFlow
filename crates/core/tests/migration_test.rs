@@ -5,7 +5,6 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
-    use focusflow_core::config::FocusFlowConfig;
     use focusflow_core::db;
     use focusflow_core::migration;
     use focusflow_core::paths;

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{AppState, ChartsStats, LiveStats, SharedStats};
 
@@ -20,6 +20,8 @@ pub fn get_live(state: State<'_, Arc<AppState>>) -> LiveStats {
         today_count: s.today_count,
         cpm: s.cpm,
         period: s.period,
+        max_day: s.max_day,
+        max_day_date: s.max_day_date.clone(),
     }
 }
 
@@ -31,6 +33,8 @@ pub fn get_charts(state: State<'_, Arc<AppState>>) -> ChartsStats {
         total: s.total,
         avg: s.avg,
         max_day: s.max_day,
+        max_day_date: s.max_day_date.clone(),
+        period: s.period,
         rank: s.rank.clone(),
         group: s.group.clone(),
         trend: s.trend.clone(),
@@ -53,6 +57,12 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     })
 }
 
+/// 返回应用版本号（单一来源：Cargo 包版本）。
+#[tauri::command]
+pub fn get_version() -> String {
+    focusflow_core::paths::APP_VERSION.to_string()
+}
+
 /// 设置统计周期（-1=今日, N=天数, 0=总计）并触发即时重聚合。
 #[tauri::command]
 pub fn set_period(state: State<'_, Arc<AppState>>, period: i64) {
@@ -68,17 +78,24 @@ pub fn get_config(state: State<'_, Arc<AppState>>, section: String, key: String)
 
 /// 写入配置值并持久化。
 #[tauri::command]
-pub fn set_config(state: State<'_, Arc<AppState>>, section: String, key: String, value: String) -> Result<(), String> {
+pub fn set_config(state: State<'_, Arc<AppState>>, app: AppHandle, section: String, key: String, value: String) -> Result<(), String> {
     state
         .config
         .set(&section, &key, &value)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // 热键配置（enabled / toggle_window）变更后运行时重新注册，无需重启。
+    if section == "hotkey" && (key == "enabled" || key == "toggle_window") {
+        crate::hotkey::reload_hotkey(&app);
+    }
+    Ok(())
 }
 
-/// 切换暂停记录，返回新的暂停状态。
+/// 切换暂停记录，返回新的暂停状态，并广播给前端（与托盘切换保持一致）。
 #[tauri::command]
-pub fn toggle_pause(state: State<'_, Arc<AppState>>) -> bool {
-    state.listener.toggle_pause()
+pub fn toggle_pause(state: State<'_, Arc<AppState>>, app: AppHandle) -> bool {
+    let paused = state.listener.toggle_pause();
+    let _ = app.emit("pause-changed", paused);
+    paused
 }
 
 /// 是否已暂停。
@@ -103,6 +120,7 @@ pub fn hide_main(app: AppHandle) {
 #[tauri::command]
 pub fn show_floating(app: AppHandle) {
     if let Some(win) = app.get_webview_window("floating") {
+        crate::state::set_webview_rendering(&app, "floating", true);
         let _ = win.show();
         let _ = win.set_focus();
     }
@@ -113,6 +131,7 @@ pub fn show_floating(app: AppHandle) {
 pub fn hide_floating(app: AppHandle) {
     if let Some(win) = app.get_webview_window("floating") {
         let _ = win.hide();
+        crate::state::set_webview_rendering(&app, "floating", false);
     }
 }
 
@@ -268,6 +287,12 @@ pub fn dbg_log(msg: String) {
     tracing::info!("[floating-debug] {msg}");
     #[cfg(not(debug_assertions))]
     let _ = msg;
+}
+
+/// 插件管理页打开/关闭时切换热重载监听（打开才扫描，平时零后台开销）。
+#[tauri::command]
+pub fn plugins_watch(watch: bool) {
+    crate::plugins::set_watch(watch);
 }
 
 /// 列出插件（复用主线程共享的插件管理器）。

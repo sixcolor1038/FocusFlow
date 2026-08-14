@@ -34,7 +34,7 @@ pub fn default_config() -> HashMap<String, HashMap<String, String>> {
         ("auto_vacuum_days", "7"),
         ("yearly_archive", "true"),
     ]);
-    s("stats", &[("cpm_window", "60"), ("today_count_cache_ttl", "10")]);
+    s("stats", &[("cpm_window", "60")]);
     s("listener", &[
         ("ignore_modifier_keys", "false"),
         ("ignore_function_keys", "false"),
@@ -75,6 +75,13 @@ pub fn default_config() -> HashMap<String, HashMap<String, String>> {
     ]);
     map
 }
+
+/// 明确废弃的配置键（section -> [key...]）：load 时仅清理这些键，
+/// 保留所有其他键（含运行时动态写入的合法键，如 [floating] width/height/pos_x/pos_y）。
+const DEPRECATED_CONFIG: &[(&str, &[&str])] = &[
+    // 已移除：今日计数用写入线程内存缓存，此键不再读取
+    ("stats", &["today_count_cache_ttl"]),
+];
 
 /// 线程安全的配置管理器。
 ///
@@ -122,6 +129,17 @@ impl FocusFlowConfig {
                             .or_default()
                             .insert(key, val);
                     }
+                }
+            }
+        }
+
+        // 仅清理明确废弃的配置键。注意：不能按"默认配置白名单"清理，
+        // 否则会误删运行时动态写入的合法键（如 [floating] width/height/pos_x/pos_y），
+        // 导致悬浮窗位置/尺寸无法在重启后保留。
+        for (section, keys) in DEPRECATED_CONFIG {
+            if let Some(map) = values.get_mut(*section) {
+                for k in *keys {
+                    map.remove(*k);
                 }
             }
         }
@@ -310,6 +328,42 @@ mod tests {
         assert_eq!(cfg.get_float("floating", "opacity", 0.0), 0.85);
 
         let _ = Arc::new(());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_keys_preserved_and_deprecated_removed() {
+        // 模拟真实 config.ini：含运行时动态键（悬浮窗位置/尺寸）
+        // 与已废弃键（today_count_cache_ttl）。
+        let dir = std::env::temp_dir().join("ff_rs_cfg_prune_test");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("config.ini");
+        std::fs::write(
+            &path,
+            "[stats]
+today_count_cache_ttl = 10
+             [floating]
+pos_x = 1488
+pos_y = 165
+width = 90
+height = 46
+             [gui]
+theme = light
+",
+        )
+        .unwrap();
+
+        let cfg = FocusFlowConfig::load(&path).unwrap();
+
+        // 运行时合法键必须被保留（否则悬浮窗位置/尺寸无法持久化）
+        assert_eq!(cfg.get_float("floating", "pos_x", f64::NAN), 1488.0);
+        assert_eq!(cfg.get_float("floating", "pos_y", f64::NAN), 165.0);
+        assert_eq!(cfg.get_float("floating", "width", f64::NAN), 90.0);
+        assert_eq!(cfg.get_float("floating", "height", f64::NAN), 46.0);
+
+        // 已废弃键应从内存移除
+        assert!(cfg.get("stats", "today_count_cache_ttl").is_empty());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, Table};
 
 use crate::accounting;
 use crate::config::FocusFlowConfig;
@@ -29,7 +29,6 @@ pub fn register_host_api(
     let host = lua.create_table()?;
 
     // 统计查询：period = -1 今日, 0 总计, N 天数。返回 (total, keys表)
-    let db_stats = Arc::clone(&database);
     let stats_fn = lua.create_function(move |lua, period: i64| {
         let (total, key_stats) = match period {
             -1 => db::get_stats_by_date(chrono::Local::now().date_naive()),
@@ -40,7 +39,6 @@ pub fn register_host_api(
         for (k, v) in &key_stats {
             keys.set(k.as_str(), *v)?;
         }
-        let _ = &db_stats;
         Ok((total, keys))
     })?;
     host.set("stats", stats_fn)?;
@@ -98,9 +96,6 @@ pub fn register_host_api(
         ))
     })?;
     host.set("app_info", info_fn)?;
-
-    // 暴露一个用于验证 Lua 值转换的辅助（测试用）
-    let _ = Value::Nil;
 
     // ---- 番茄钟 API ----
     // 共享番茄钟实例（进程级单例）
@@ -318,9 +313,10 @@ pub fn register_host_api(
     host.set("accounting_summary", acc_summary)?;
 
     // ---- Edge 历史 API ----
+    // 返回 (是否成功, 今日数, 总数)；失败时 ok=false，插件据此提示而非显示 0
     let edge_update = lua.create_function(|_, ()| {
-        let (today, total) = edge_history::update_today_edge_history();
-        Ok((today, total))
+        let (ok, today, total) = edge_history::update_today_edge_history();
+        Ok((ok, today, total))
     })?;
     host.set("edge_update_today", edge_update)?;
 
@@ -339,12 +335,25 @@ pub fn register_host_api(
 
     let edge_today = lua.create_function(|_, ()| {
         let today = chrono::Local::now().date_naive();
-        Ok(edge_history::query_edge_history_count(today))
+        Ok(edge_history::query_edge_history_count(today).unwrap_or(0))
     })?;
     host.set("edge_today_count", edge_today)?;
 
-    let edge_total = lua.create_function(|_, ()| Ok(edge_history::query_edge_total_count()))?;
+    let edge_total = lua.create_function(|_, ()| {
+        Ok(edge_history::query_edge_total_count().unwrap_or(0))
+    })?;
     host.set("edge_total_count", edge_total)?;
+
+    // 本地缓存（上次刷新保存的值），插件重启后恢复显示
+    let edge_saved_today = lua.create_function(|_, ()| {
+        Ok(edge_history::get_edge_history_saved_today())
+    })?;
+    host.set("edge_saved_today", edge_saved_today)?;
+
+    let edge_saved_total = lua.create_function(|_, ()| {
+        Ok(edge_history::get_edge_history_saved_total())
+    })?;
+    host.set("edge_saved_total", edge_saved_total)?;
 
     // 注册为全局 `focusflow`
     lua.globals().set("focusflow", host.clone())?;

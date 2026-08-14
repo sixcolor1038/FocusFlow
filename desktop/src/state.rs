@@ -20,6 +20,8 @@ pub struct SharedStats {
     pub total: i64,
     pub avg: i64,
     pub max_day: i64,
+    /// 最高单日对应的日期（YYYY-MM-DD）
+    pub max_day_date: String,
     pub rank: Vec<(String, i64)>,
     pub group: Vec<(String, i64)>,
     pub trend: Vec<(String, i64)>,
@@ -34,6 +36,10 @@ pub struct LiveStats {
     pub today_count: i64,
     pub cpm: i64,
     pub period: i64, // -1=今日, 0=总计, N=天数
+    /// 当前周期最高单日（今日破纪录时随快节奏即时更新）
+    pub max_day: i64,
+    /// 最高单日对应的日期（YYYY-MM-DD）
+    pub max_day_date: String,
 }
 
 /// 重量级图表数据（周期切换 / 定时重聚合，事件 `stats-charts` 推送）。
@@ -42,6 +48,9 @@ pub struct ChartsStats {
     pub total: i64,
     pub avg: i64,
     pub max_day: i64,
+    /// 最高单日对应的日期（YYYY-MM-DD）
+    pub max_day_date: String,
+    pub period: i64,
     pub rank: Vec<(String, i64)>,
     pub group: Vec<(String, i64)>,
     pub trend: Vec<(String, i64)>,
@@ -77,6 +86,8 @@ impl AppState {
 
         // 启动即加载插件（番茄钟/定时任务等随插件 init 运行，对齐 Python 版）
         crate::plugins::with_manager(&db, |_pm| {});
+        // 插件热重载（Tauri 无 GUI 轮询循环，用独立扫描线程 + 主线程重载）
+        crate::plugins::start_hot_reload(app.handle(), Arc::clone(&db));
 
         let shared = Arc::new(Mutex::new(SharedStats::default()));
         // 默认周期 = 上次退出前选择的周期（前端切换时写入 gui.default_period）
@@ -219,17 +230,29 @@ fn setup_windows(app: &App, state: &AppState) {
 
     // 启动即按当前活跃状态设置悬浮窗内存档位（启动进托盘=非活跃=Low）。
     // 注意：WebView2 控制器是异步创建的，setup 阶段直接调用会静默失败，
-    // 因此延时 2 秒再设置（主窗口若已打开则保持 Normal）。
+    // 因此后台线程重试直到控制器就绪（每次重试前重新判断主窗口可见性，
+    // 用户可能已打开主界面，此时应保持 Normal）。
     let handle = app.handle().clone();
     std::thread::Builder::new()
         .name("mem-level-init".into())
         .spawn(move || {
-            std::thread::sleep(Duration::from_secs(2));
-            let main_visible = handle
-                .get_webview_window("main")
-                .map(|w| w.is_visible().unwrap_or(false))
-                .unwrap_or(false);
-            set_floating_memory_level(&handle, !main_visible);
+            // 冷启动 WebView2 环境创建可能较慢，最多重试 60 秒
+            for i in 0..60 {
+                let main_visible = handle
+                    .get_webview_window("main")
+                    .map(|w| w.is_visible().unwrap_or(false))
+                    .unwrap_or(false);
+                if set_floating_memory_level(&handle, !main_visible) {
+                    tracing::info!(
+                        "WebView2 内存档位已设置 (low={})，重试 {} 次",
+                        !main_visible,
+                        i
+                    );
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            tracing::warn!("WebView2 内存档位设置失败：控制器长时间未就绪");
         })
         .expect("启动内存档位初始化线程失败");
 }
@@ -238,11 +261,16 @@ fn setup_windows(app: &App, state: &AppState) {
 /// 应用活跃（主窗口可见）→ Normal；仅托盘/悬浮窗（非活跃）→ Low。
 /// WebView2 官方 MemoryUsageTargetLevel API，非活跃时设 Low 可显著降低内存占用。
 /// 主窗口虽隐藏但其页面仍在运行，同样要降档才能把内存压下来。
-pub fn set_floating_memory_level(app: &tauri::AppHandle, low: bool) {
+/// 返回是否全部设置成功（WebView2 控制器未就绪时返回 false，调用方可重试）。
+pub fn set_floating_memory_level(app: &tauri::AppHandle, low: bool) -> bool {
+    let mut all_ok = true;
     for label in ["main", "floating"] {
         if let Some(win) = app.get_webview_window(label) {
             let low = low;
-            let _ = win.with_webview(move |webview| {
+            // with_webview 闭包无返回值，用共享标志记录是否真正设置成功
+            let done = Arc::new(AtomicBool::new(false));
+            let done_cb = Arc::clone(&done);
+            let result = win.with_webview(move |webview| {
                 #[cfg(windows)]
                 unsafe {
                     use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -258,12 +286,43 @@ pub fn set_floating_memory_level(app: &tauri::AppHandle, low: bool) {
                             } else {
                                 COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
                             };
-                            let _ = v19.SetMemoryUsageTargetLevel(level);
+                            done_cb.store(
+                                v19.SetMemoryUsageTargetLevel(level).is_ok(),
+                                Ordering::SeqCst,
+                            );
+                        } else {
+                            tracing::warn!("WebView2 运行时过旧，不支持内存档位 API（需 1.0.2390+）");
                         }
                     }
+                    // CoreWebView2 未就绪：静默，等待调用方重试
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = low;
+                    done_cb.store(true, Ordering::SeqCst);
                 }
             });
+            all_ok = all_ok && result.is_ok() && done.load(Ordering::SeqCst);
         }
+    }
+    all_ok
+}
+
+/// 设置 WebView2 控制器可见性（IsVisible）。
+/// 窗口隐藏时 WebView2 控制器并不知道自身不可见，仍会维持渲染合成管线；
+/// 调用 put_IsVisible(false) 可停止渲染、进一步释放内存与 CPU（WebView2 官方建议）。
+/// 显示窗口前必须先恢复 true，否则内容不会重绘。
+pub fn set_webview_rendering(app: &tauri::AppHandle, label: &str, visible: bool) {
+    if let Some(win) = app.get_webview_window(label) {
+        let _ = win.with_webview(move |webview| {
+            #[cfg(windows)]
+            unsafe {
+                let controller = webview.controller();
+                let _ = controller.SetIsVisible(visible);
+            }
+            #[cfg(not(windows))]
+            let _ = visible;
+        });
     }
 }
 
@@ -289,11 +348,17 @@ pub fn show_main_window(app: &tauri::AppHandle) {
         }
     }
     if let Some(win) = app.get_webview_window("main") {
+        // 恢复 WebView2 渲染（隐藏时已停用），再显示窗口
+        set_webview_rendering(app, "main", true);
         // 恢复任务栏按钮（隐藏时切走过）
         let _ = win.set_skip_taskbar(false);
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+    }
+    // 主窗口打开：立即触发一次重聚合，图表数据马上刷新（隐藏期间重聚合已停用）
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.refresh_now.store(true, Ordering::Relaxed);
     }
     // 应用进入活跃状态：悬浮窗回到 Normal 内存档位
     set_floating_memory_level(app, false);
@@ -307,6 +372,8 @@ pub fn show_main_window(app: &tauri::AppHandle) {
 pub fn hide_main_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
+        // 停止 WebView2 渲染合成，释放渲染管线内存（窗口仍常驻，显示时再恢复）
+        set_webview_rendering(app, "main", false);
         // 促使任务管理器重新评估"应用/后台进程"：隐藏窗口不会触发窗口销毁
         // 通知，TM 不会重新分类；AddTab/DeleteTab 产生 shell 事件，
         // 让 TM 重新枚举（窗口已隐藏，切换无视觉影响）。
@@ -426,8 +493,8 @@ fn spawn_stats_worker(
         .spawn(move || {
             tracing::info!("统计线程已启动");
             let mut prev_logged_today: i64 = -1;
-            let idle_heavy_ms = (config.get_int("gui", "full_refresh_interval", 10).max(1) as u64) * 1000;
-            let active_heavy_ms = 5_000u64;
+            // "统计更新"日志限频时间戳（打字时计数每秒变化，避免刷屏）
+            let mut last_stats_log = Instant::now() - Duration::from_secs(61);
             let tick_ms = 500u64;
 
             let mut prev_period: i64 = i64::MIN;
@@ -436,6 +503,9 @@ fn spawn_stats_worker(
             let mut prev_cpm: i64 = -1;
             // 上次重聚合时的今日计数：空闲且数据未变时跳过重聚合，避免无谓的整库查询
             let mut last_heavy_today: i64 = -1;
+            // 各周期最高单日缓存：period -> (次数, 日期)；重聚合播种，今日破纪录时快节奏即时更新
+            let mut period_max: std::collections::HashMap<i64, (i64, String)> =
+                std::collections::HashMap::new();
 
             loop {
                 let period_val = period.load(Ordering::Relaxed);
@@ -444,11 +514,23 @@ fn spawn_stats_worker(
                 let cur_today = db.writer().map(|w| w.today_count()).unwrap_or(0) as i64;
                 let active = cur_today != prev_today_count;
                 let heavy_elapsed_ms = last_heavy.elapsed().as_millis() as u64;
-                let heavy_interval_ms = if active {
-                    active_heavy_ms
+
+                // 重聚合节奏随主窗口可见性自适应：
+                // - 主窗口打开：活跃（打字）时每 active_refresh_interval 秒刷新一次图表；
+                //   空闲时按 full_refresh_interval（配置）刷新。
+                // - 主窗口隐藏：悬浮窗/托盘只需要今日计数与速度（快节奏 500ms），
+                //   重聚合完全停掉，只在强制/周期切换时执行（打开窗口会触发强制刷新）。
+                let main_visible = app
+                    .get_webview_window("main")
+                    .map(|w| w.is_visible().unwrap_or(false))
+                    .unwrap_or(false);
+                let heavy_interval_ms = if !main_visible {
+                    u64::MAX
+                } else if active {
+                    (config.get_int("gui", "active_refresh_interval", 2).max(1) as u64) * 1000
                 } else if cur_today != last_heavy_today {
                     // 空闲但数据自上次重聚合后有变化：按空闲周期刷新
-                    idle_heavy_ms
+                    (config.get_int("gui", "full_refresh_interval", 10).max(1) as u64) * 1000
                 } else {
                     // 空闲且数据未变：无需重算，等有输入或强制/周期切换
                     u64::MAX
@@ -456,6 +538,13 @@ fn spawn_stats_worker(
                 let do_heavy = forced || period_changed || heavy_elapsed_ms >= heavy_interval_ms;
 
                 if do_heavy {
+                    // 先把写线程内存中的增量落库，图表查询才能看到最新按键
+                    // （否则排行/趋势/最高单日最多滞后一个 flush 周期）
+                    if let Some(w) = db.writer() {
+                        if w.has_pending() {
+                            w.flush(true);
+                        }
+                    }
                     let (total, key_stats) = match period_val {
                         -1 => focusflow_core::db::get_stats_by_date(chrono::Local::now().date_naive()),
                         0 => focusflow_core::db::get_stats(None, None),
@@ -506,7 +595,27 @@ fn spawn_stats_worker(
                     } else {
                         counts.iter().sum::<i64>() / counts.len() as i64
                     };
-                    let max_day = counts.iter().copied().max().unwrap_or(0);
+                    // 最高单日：今日/总计 = 全历史纪录（含日期）；N天 = 窗口内最大（含日期）。
+                    // 窗口值从 daily_all 取（已含落库后的今日），历史纪录跨库取。
+                    let today_str = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+                    let (max_day, max_day_date) = if period_val == -1 || period_val == 0 {
+                        // get_alltime_max_day 返回 (日期, 次数)
+                        let (d, c) = focusflow_core::db::get_alltime_max_day()
+                            .unwrap_or((today_str.clone(), 0));
+                        (c, d)
+                    } else {
+                        let window: Vec<(String, i64)> = if total_days >= daily_days as usize {
+                            daily_all[total_days - daily_days as usize..].to_vec()
+                        } else {
+                            daily_all.clone()
+                        };
+                        window
+                            .iter()
+                            .max_by_key(|(_, c)| *c)
+                            .map(|(d, c)| (*c, d.clone()))
+                            .unwrap_or((0, today_str.clone()))
+                    };
+                    period_max.insert(period_val, (max_day, max_day_date.clone()));
                     let trend: Vec<(String, i64)> = if total_days >= 7 {
                         daily_all[total_days - 7..].to_vec()
                     } else {
@@ -534,6 +643,8 @@ fn spawn_stats_worker(
                         total,
                         avg,
                         max_day,
+                        max_day_date,
+                        period: period_val,
                         rank,
                         group,
                         trend,
@@ -546,6 +657,7 @@ fn spawn_stats_worker(
                         s.total = charts.total;
                         s.avg = charts.avg;
                         s.max_day = charts.max_day;
+                        s.max_day_date.clone_from(&charts.max_day_date);
                         s.rank.clone_from(&charts.rank);
                         s.group.clone_from(&charts.group);
                         s.trend.clone_from(&charts.trend);
@@ -559,11 +671,30 @@ fn spawn_stats_worker(
                 let today_count = cur_today;
                 let cpm = focusflow_core::stats::cpm(config).get_cpm();
 
+                // 增量维护各周期最高单日：今日计数超过纪录立即更新（零 DB 查询）。
+                // 今日包含在一切周期窗口内，一次比较对所有周期成立。
+                if today_count > 0 {
+                    let today_str =
+                        chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+                    for (_, (v, d)) in period_max.iter_mut() {
+                        if today_count > *v {
+                            *v = today_count;
+                            *d = today_str.clone();
+                        }
+                    }
+                }
+                let (max_day, max_day_date) = period_max
+                    .get(&period_val)
+                    .cloned()
+                    .unwrap_or((0, String::new()));
+
                 {
                     let mut s = shared.lock().unwrap();
                     s.today_count = today_count;
                     s.cpm = cpm;
                     s.period = period_val;
+                    s.max_day = max_day;
+                    s.max_day_date = max_day_date.clone();
                 }
 
                 let live_changed =
@@ -575,6 +706,8 @@ fn spawn_stats_worker(
                             today_count,
                             cpm,
                             period: period_val,
+                            max_day,
+                            max_day_date,
                         },
                     );
                 }
@@ -583,7 +716,11 @@ fn spawn_stats_worker(
                 prev_period = period_val;
 
                 if today_count != prev_logged_today {
-                    tracing::info!("统计更新: today={today_count} cpm={cpm}");
+                    // 限频：打字时今日计数每秒都在变，每 60 秒最多记一条，避免日志刷屏
+                    if last_stats_log.elapsed() >= Duration::from_secs(60) {
+                        tracing::info!("统计更新: today={today_count} cpm={cpm}");
+                        last_stats_log = Instant::now();
+                    }
                     prev_logged_today = today_count;
                 }
 
@@ -592,3 +729,34 @@ fn spawn_stats_worker(
         })
         .expect("启动统计线程失败");
 }
+
+#[cfg(test)]
+mod classify_key_tests {
+    use super::classify_key;
+
+    #[test]
+    fn categories() {
+        assert_eq!(classify_key("滚轮下滑"), "滚轮");
+        assert_eq!(classify_key("鼠标左键"), "鼠标点击");
+        assert_eq!(classify_key("左Ctrl"), "修饰键");
+        assert_eq!(classify_key("Alt"), "修饰键");
+        assert_eq!(classify_key("F5"), "功能键");
+        assert_eq!(classify_key("3"), "数字键");
+        assert_eq!(classify_key("A"), "字母键");
+        assert_eq!(classify_key("空格"), "编辑键");
+        assert_eq!(classify_key("回车"), "编辑键");
+        assert_eq!(classify_key("Delete"), "编辑键");
+        assert_eq!(classify_key("→"), "编辑键");
+        assert_eq!(classify_key("自定义"), "其他");
+    }
+
+    #[test]
+    fn function_key_boundary() {
+        // F 开头 + 数字才算功能键；单个 "F" 或 "F0" 不是
+        assert_eq!(classify_key("F1"), "功能键");
+        assert_eq!(classify_key("F12"), "功能键");
+        assert_eq!(classify_key("F"), "字母键"); // 单字母 F 归为字母键
+        assert_eq!(classify_key("F12x"), "其他"); // 非纯数字后缀 → 其他
+    }
+}
+
